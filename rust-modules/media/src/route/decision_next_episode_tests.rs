@@ -27,7 +27,7 @@ fn a_durable_pick_is_live_persisted_and_reported_once() {
         [DiagEvent::FeatureUsed { feature: Feature::NextEpisode(NextEpisodeMode::AfterCredits) }]
     );
 
-    // choosing the default again removes the key from the file, and is still a (reported) pick
+    // Choosing Countdown is now an explicit saved pick rather than an omitted default.
     let (saved, events) = plx_telemetry::diag::test_events::capture(|| set_next_episode_mode(NextEpisodeMode::Countdown));
     assert!(saved);
     assert_eq!(plx_plex::plex::session::load().next_episode_mode(), NextEpisodeMode::Countdown);

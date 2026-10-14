@@ -6333,7 +6333,7 @@ pub fn set_direct_play_mode(mode: DirectPlayMode) -> bool {
 /// What the player does at an episode's credits when a successor is queued — install-wide, like
 /// [`DIRECT_PLAY_MODE`]. Read by `appkit::player_hud::slot` every frame and by `finish_playback` at
 /// the end of the stream.
-static NEXT_EPISODE_MODE: AtomicU8 = AtomicU8::new(0); // NextEpisodeMode::Countdown's index
+static NEXT_EPISODE_MODE: AtomicU8 = AtomicU8::new(1); // NextEpisodeMode::AfterCredits's index
 
 pub fn next_episode_mode() -> NextEpisodeMode {
     NextEpisodeMode::from_index(NEXT_EPISODE_MODE.load(Ordering::Relaxed))

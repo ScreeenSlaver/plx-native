@@ -40,16 +40,17 @@ needed; title guessing is not used.
 Episodes require verified TMDB aired ordering. When a show inherits its library's ordering,
 the shared Plex token must be able to read that preference. If the server refuses it, or uses
 DVD, absolute, TVDB or unknown ordering, community timings are left unavailable. Server markers
-and More → Next Episode remain usable.
+and the direct Next Episode button remain usable.
 
 When the playhead reaches a known intro or recap, the player offers a **Skip Intro** or **Skip
 Recap** control. Pressing the control performs the skip; it is not automatic. No Plex marker needs
 to be created manually, and the app does not submit timings or media.
 
 The persistent **Next episode** preference is in **Settings → Playback → Next episode**:
-**Countdown**, **After credits**, or **Off**. The **Next Episode** item in the More menu is a
-one-time action that starts the queued episode immediately; it does not change that saved
-preference.
+**Countdown**, **After credits**, or **Off**. This personal build defaults to **After credits**:
+the next episode starts after the whole stream, including any outro scene, finishes. The labelled
+**Next Episode** button stays at the far right of the player controls whenever a successor is
+queued. Pressing it advances immediately and does not change that saved preference.
 
 See [the privacy policy](../PRIVACY.md#community-skip-segment-lookups) for the exact lookup data and
 network disclosure. On-device playback, display and performance have not been verified by the

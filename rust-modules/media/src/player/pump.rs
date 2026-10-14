@@ -131,6 +131,58 @@ fn hls_buffered_ms() -> Option<i64> {
 /// 2026-08-21). 201 is that measurement rather than the nominal 200.
 const NATIVE_POSITION_PERIOD_MS: u32 = 201;
 
+const EOS_TAIL_NS: i64 = 1_000_000_000;
+const EOS_CLOCK_GRACE_MS: u32 = NATIVE_POSITION_PERIOD_MS * 2;
+// Compatibility bound for a native clock which keeps reporting a near-end value without ever
+// reaching duration. Deliberate holds reset this budget; it is never time spent paused/seeking.
+const EOS_MAX_TAIL_DWELL_MS: u32 = 5_000;
+
+#[derive(Default)]
+pub(super) struct EosTail {
+    window: Option<EosWindow>,
+}
+
+struct EosWindow {
+    entered: u32,
+    progress: u32,
+    pos_ns: i64,
+    dur_ns: i64,
+    pause_sequence: u64,
+}
+
+impl EosTail {
+    pub(super) fn reset(&mut self) { self.window = None; }
+
+    /// True EOF means the last packets were FED, not displayed. A running tail must receive its
+    /// remaining presentation time before completion. Position advances restart that dwell; a
+    /// clock stopping just shy of duration still completes without requiring an impossible tick.
+    fn complete(&mut self, now: u32, eof: bool, running: bool, pause_sequence: u64,
+        pos_ns: i64, dur_ns: i64) -> bool {
+        if !eof || !running || dur_ns <= 0 || pos_ns < 0 || pos_ns < dur_ns - EOS_TAIL_NS {
+            self.reset();
+            return false;
+        }
+        if pos_ns >= dur_ns {
+            self.reset();
+            return true;
+        }
+        if self.window.as_ref().is_some_and(|w| w.dur_ns != dur_ns || pos_ns < w.pos_ns
+            || w.pause_sequence != pause_sequence || now.wrapping_sub(w.entered) >= 0x8000_0000) {
+            self.reset();
+        }
+        let window = self.window.get_or_insert(EosWindow {
+            entered: now, progress: now, pos_ns, dur_ns, pause_sequence,
+        });
+        if pos_ns > window.pos_ns {
+            window.pos_ns = pos_ns;
+            window.progress = now;
+        }
+        let remaining_ms = ((dur_ns - pos_ns + 999_999) / 1_000_000) as u32;
+        now.wrapping_sub(window.progress) >= remaining_ms + EOS_CLOCK_GRACE_MS
+            || now.wrapping_sub(window.entered) >= EOS_MAX_TAIL_DWELL_MS
+    }
+}
+
 /// How many consecutive silent periods make the presentation clock physically STOPPED rather
 /// than merely late.
 ///
@@ -1058,6 +1110,14 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
             return;
         }
     };
+    // Clear a prior tail observation before any recovery/hold early return. A paused session's
+    // wall time must never be mistaken for time presenting its final frames.
+    if eng.eos_tail.window.is_some() && (TX.paused.load(Acquire) || SHARED.seeking.load(Relaxed) || TX.seek_to_ns.load(Relaxed) >= 0
+        || eng.rebase_pending || eng.flushed || SHARED.hls_rebuffering.load(Relaxed)
+        || eng.prime_play || SHARED.frames.load(Relaxed) == 0
+        || super::claim_hold::active() || crate::route::recovery_flight_outstanding()) {
+        eng.eos_tail.reset();
+    }
     // Republish the Engine-confined values the diagnostics read-out needs, BEFORE the early
     // returns below. Placed here, immediately after the borrow, for two reasons: it is the one
     // spot that cannot be forgotten as the pump grows, and it therefore keeps reporting through
@@ -1562,6 +1622,10 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
         // eng.flushed → feed_stream fires setTimeToDecode+sendSegmentEvent on the first post-seek
         // keyframe. disp_base=0 (rebase to the landed keyframe).
         eng.flushed = true;
+        // flush retires the old native EOS as well as its queued frames. The new seek epoch
+        // needs its own true EOF push and its own presentation-tail observation.
+        eng.eos_pushed = false;
+        eng.eos_tail.reset();
         eng.presentation_rearm_pending = false;
         SHARED.seek_to_ns.store(t, Release); // the demux thread's av_seek target
         SHARED.seek_target_ns.store(t, Relaxed); // rebase guard: reject stale drifted keyframes
@@ -1810,11 +1874,9 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
         }
     }
 
-    // ---------- end-of-stream: the producer hit file EOF (eos_pushed → all AUs to the end were
-    // fed) and the pipeline has now played out to within EOS_TAIL of the duration. Mark ended so
-    // app.rs tears the player down at the credits instead of freezing on the last frame. Paused
-    // at the end stays paused (playpos won't climb) — correct; it fires when resumed. Any seek
-    // clears the flag (request_seek), so seeking back from the end doesn't re-trigger. ----------
+    // True EOF drains the producer, then the engine-local guard gives the native presentation
+    // tail time to finish. Duration's final second is a compatibility window, never an immediate
+    // permission to advance. Pause/seek/rebase/holds cannot spend that presentation budget.
     // ---------- publish the derived UI state (see PlaybackState's doc) ----------
     // Order matters: a seek in flight outranks "we have frames", because the frames on the panel
     // are the PRE-seek ones and the HUD must show the target, not them.
@@ -1828,11 +1890,15 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
         PlaybackState::Playing
     });
 
-    const EOS_TAIL_NS: i64 = 1_000_000_000;
     if eng.eos_pushed && !SHARED.ended.load(Relaxed) {
         let dur = SHARED.duration_ns.load(Relaxed);
         let pos = SHARED.playpos_ns.load(Relaxed);
-        if dur > 0 && pos >= dur - EOS_TAIL_NS {
+        let pause = TX.pause_state_sample();
+        let running = !pause.paused && !SHARED.seeking.load(Relaxed) && TX.seek_to_ns.load(Relaxed) < 0
+            && !eng.rebase_pending && !eng.flushed && !SHARED.hls_rebuffering.load(Relaxed)
+            && !eng.prime_play && eng.stage >= Stage::Streaming && SHARED.frames.load(Relaxed) > 0
+            && !super::claim_hold::active();
+        if eng.eos_tail.complete(now, eng.eos_pushed, running, pause.sequence, pos, dur) {
             SHARED.ended.store(true, Relaxed);
             super::log(&format!(
                 "EOS reached: playpos={}s/{}s → ended",
@@ -1845,6 +1911,60 @@ pub fn pump(ps: &mut crate::route::PlaybackSession, pa: &mut super::adapter::Pla
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn true_eof_waits_for_the_remaining_final_second_and_completes_a_short_native_clock() {
+        let dur = 20_000_000_000;
+        let mut tail = super::EosTail::default();
+        assert!(!tail.complete(0, false, true, 0, dur - 1_000_000_000, dur), "a truncated producer is not EOS");
+        assert!(!tail.complete(0, true, true, 0, dur - 1_000_000_000, dur), "pushing EOF is not presentation completion");
+        assert!(!tail.complete(1000, true, true, 0, dur - 1_000_000_000, dur), "the callback cadence grace still protects the final frames");
+        assert!(tail.complete(1000 + super::EOS_CLOCK_GRACE_MS, true, true, 0, dur - 1_000_000_000, dur), "a clock parked shy of duration must not hang");
+        assert!(super::EosTail::default().complete(0, true, true, 0, dur, dur), "an observed duration needs no guessed dwell");
+    }
+
+    #[test]
+    fn advancing_outro_clock_refreshes_the_presentation_dwell_but_has_a_compatibility_bound() {
+        let dur = 20_000_000_000;
+        let mut tail = super::EosTail::default();
+        assert!(!tail.complete(0, true, true, 0, dur - 900_000_000, dur));
+        assert!(!tail.complete(700, true, true, 0, dur - 600_000_000, dur));
+        assert!(!tail.complete(1400, true, true, 0, dur - 200_000_000, dur), "the initial deadline cannot cut off a clock still presenting the outro");
+        assert!(!tail.complete(2001, true, true, 0, dur - 200_000_000, dur));
+        assert!(tail.complete(2002, true, true, 0, dur - 200_000_000, dur));
+        let mut broken_clock = super::EosTail::default();
+        for ms in (0..super::EOS_MAX_TAIL_DWELL_MS).step_by(100) {
+            assert!(!broken_clock.complete(ms, true, true, 0, dur - 1_000_000_000 + i64::from(ms), dur));
+        }
+        assert!(broken_clock.complete(super::EOS_MAX_TAIL_DWELL_MS, true, true, 0, dur - 999_995_000, dur), "a broken near-end clock remains bounded");
+    }
+
+    #[test]
+    fn pauses_hidden_pause_cycles_and_seeks_cannot_spend_a_previous_tail_budget() {
+        let dur = 20_000_000_000;
+        let pos = dur - 500_000_000;
+        let mut tail = super::EosTail::default();
+        assert!(!tail.complete(0, true, true, 0, pos, dur));
+        assert!(!tail.complete(10_000, true, false, 1, pos, dur), "paused at the end stays paused");
+        assert!(!tail.complete(10_001, true, false, 1, dur, dur), "even an exact end cannot advance while held");
+        assert!(!tail.complete(20_000, true, true, 2, pos, dur), "resume receives a fresh remaining-tail budget");
+        assert!(!tail.complete(30_000, true, true, 4, pos, dur), "a complete pause/resume between pump samples is fenced by sequence");
+        assert!(!tail.complete(40_000, false, true, 4, pos, dur), "a seek retires the old EOF");
+        assert!(!tail.complete(50_000, true, true, 4, pos, dur), "the seek's new EOF starts a new dwell");
+        assert!(!tail.complete(60_000, true, true, 4, pos - 100_000_000, dur), "backward repositioning cannot reuse an expired dwell");
+    }
+
+    #[test]
+    fn tail_dwell_survives_sdl_tick_wrap_and_requires_a_known_duration_window() {
+        let dur = 20_000_000_000;
+        let pos = dur - 100_000_000;
+        let start = u32::MAX - 100;
+        let mut tail = super::EosTail::default();
+        assert!(!tail.complete(start, true, true, 0, pos, dur));
+        assert!(!tail.complete(start.wrapping_add(501), true, true, 0, pos, dur));
+        assert!(tail.complete(start.wrapping_add(502), true, true, 0, pos, dur));
+        assert!(!tail.complete(1000, true, true, 0, pos, 0));
+        assert!(!tail.complete(2000, true, true, 0, dur - 2_000_000_000, dur));
+    }
     use super::{
         commit_or_carry_seek, rearm_carried_seek, TX,
         hls_buffered_ms, native_clock_silence_ms, native_clock_stopped, open_failure_action,

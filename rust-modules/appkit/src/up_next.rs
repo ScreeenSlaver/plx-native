@@ -1,14 +1,14 @@
 //! **Up Next** — the next-episode tile in the transport HUD (`Player Screen.dc.html`, the control
 //! row's third occupant). It appears when the playing episode reaches a FINAL credits marker (one
 //! that runs to the end of the item) and the PlayQueue has another episode behind it, under the
-//! default Next episode preference (Up Next countdown): the next episode's still, its address and
+//! optional Up Next countdown preference: the next episode's still, its address and
 //! name, and a countdown that starts it on its own.
 //!
 //! The data is `route::up_next()` — lifted from the `continuous=1` PlayQueue that every playback
 //! already creates, so nothing here asks the server what plays next.
 //!
-//! It TAKES THE PLACE of the transport's Subtitles/Audio discs — the same control row the Skip
-//! button uses, the same right edge — with the still and its caption stacked directly above. The
+//! Watch Credits takes the place of the transport's Subtitles/Audio discs. More and the persistent
+//! far-right Next Episode button remain, with the still and its caption above Next. The
 //! countdown is the primary button's own fill sweep (`Button::progress`), so the control and the
 //! timer are one object rather than a button beside a rail.
 //!
@@ -16,8 +16,7 @@
 //! takes the [`ctrl_slot`](crate::player_hud::ctrl_slot) width — the floor that keeps the row
 //! from visibly shrinking when it appears — while *Watch Credits* takes only its own label's, since
 //! a second full-width capsule would read as a pair of equals when one continues watching and the
-//! other does nothing at all. They are laid out in that spatial order, so LEFT reaches Watch
-//! Credits and RIGHT returns.
+//! other does nothing at all. More sits between them, before the permanent Next button.
 //!
 //! It is HUD furniture, not an overlay: playback keeps running underneath and the credits keep
 //! rolling. That is what makes the countdown honest — `app.rs` holds the HUD up for as long as it
@@ -45,10 +44,10 @@ use std::os::raw::c_int;
 /// title and reach for the remote, short enough that "always the next episode" stays automatic.
 pub const COUNTDOWN_MS: u32 = 10_000;
 
-/// The row's two items, in the order they are DRAWN — so `hud_nav.btn` and the arrow keys agree
-/// without a translation table (LEFT lands on 0 because 0 is the left one).
+/// Watch Credits, More, Next Episode — the order of the persistent controls is unchanged.
 pub const BTN_CREDITS: c_int = 0;
-pub const BTN_NEXT: c_int = 1;
+pub const BTN_MORE: c_int = 1;
+pub const BTN_NEXT: c_int = 2;
 /// Where the focus ring parks when the row appears: the PRIMARY, which here is the right-hand item
 /// rather than the usual 0. `ControlSlot::primary_btn` is what reads this, so the appear edge in
 /// `app.rs` stays one line for every occupant.
@@ -193,9 +192,6 @@ const CAP_GAP: f32 = theme::space::XS;
 /// …and the buttons are separate actionable objects, so they get more air. Unequal gaps are what
 /// create the grouping; an earlier 8/8 left the caption belonging to neither.
 const BTN_GAP: f32 = theme::space::MD;
-/// between the two buttons — the design's `--space-sm`, tighter than the gap to the caption above
-/// so the pair reads as one row before it reads as two controls
-const PILL_GAP: f32 = theme::space::SM;
 const CAPTION_H: f32 = 30.0;
 
 
@@ -219,18 +215,18 @@ pub struct Layout {
 /// are one arrangement and the arrangement is host-testable. Measuring is the impure half and lives
 /// in [`layout`]: `text_width` is `TTF_SizeUTF8`, which the host suite cannot even link against.
 pub fn layout_of(next_w: f32, credits_w: f32) -> Layout {
-    use crate::player_hud::{CTRL_H, STANDIN_RIGHT, CTRL_Y};
-    let next = Rect::new(STANDIN_RIGHT - next_w, CTRL_Y, next_w, CTRL_H);
-    let credits = Rect::new(next.x - PILL_GAP - credits_w, next.y, credits_w, next.h);
+    use crate::player_hud::{CTRL_RIGHT, CTRL_Y};
+    let next = crate::player_hud::next_button_rect(next_w);
+    let credits = Rect::new(crate::player_hud::standin_right(next_w) - credits_w, next.y, credits_w, next.h);
     let caption = Rect::new(
-        STANDIN_RIGHT - CAPTION_W,
+        CTRL_RIGHT - CAPTION_W,
         CTRL_Y - BTN_GAP - CAPTION_H,
         CAPTION_W,
         CAPTION_H,
     );
     let still_h = (next_w * 9.0 / 16.0).round();
     let still = Rect::new(
-        STANDIN_RIGHT - next_w,
+        CTRL_RIGHT - next_w,
         caption.y - CAP_GAP - still_h,
         next_w,
         still_h,
@@ -243,15 +239,11 @@ pub fn layout_of(next_w: f32, credits_w: f32) -> Layout {
     }
 }
 
-/// [`layout_of`] over the two measured widths. The primary takes the same control-row slot the
-/// Subtitles/Audio pair occupies — never narrower than the pair it replaces, so the row does not
-/// visibly shrink when it appears — while *Watch Credits* takes only its own label's width:
-/// deliberately NOT a second `ctrl_slot`, because that floor exists to hold the row's right edge
-/// steady, which is the primary's job, and two equal capsules would say the two choices are
-/// equivalent.
+/// [`layout_of`] over the two measured widths. Next uses the permanent button's same width and
+/// far-right edge; Watch Credits takes its own label's width before More.
 pub fn layout(row: &mut crate::player_hud::TransportRow, measure: &dyn plx_machine::machine::Measure) -> Layout {
     layout_of(
-        crate::player_hud::ctrl_slot(row, plx_platform::i18n::msg::widgets_next_episode(), measure).w,
+        crate::player_hud::ctrl_slot(row, plx_platform::i18n::msg::widgets_next_episode(), crate::player_hud::CTRL_RIGHT, measure).w,
         plx_ui::widgets::Button::pill_w_measured(plx_platform::i18n::msg::widgets_next_credits_c(), theme::size::BODY, false, false, measure),
     )
 }
@@ -376,10 +368,10 @@ mod tests {
             "reaching for Watch Credits is reaching for the alternative"
         );
         assert!(
-            !countdown_may_run(true, true, crate::player_hud::BTN_MORE),
+            !countdown_may_run(true, true, BTN_MORE),
             "reaching for More cancels automatic advance"
         );
-        for b in [BTN_CREDITS, BTN_NEXT, crate::player_hud::BTN_MORE] {
+        for b in [BTN_CREDITS, BTN_NEXT, BTN_MORE] {
             assert!(
                 !countdown_may_run(true, false, b),
                 "focus off the row is the user driving the transport, whatever btn still says"
@@ -393,7 +385,7 @@ mod tests {
     /// a countdown nobody can see. Every combination is refused while a panel is up.
     #[test]
     fn an_open_panel_refuses_the_countdown_however_the_ring_rests_under_it() {
-        for b in [BTN_CREDITS, BTN_NEXT, crate::player_hud::BTN_MORE] {
+        for b in [BTN_CREDITS, BTN_NEXT, BTN_MORE] {
             for focused in [false, true] {
                 assert!(
                     !countdown_may_run(false, focused, b),
@@ -413,8 +405,8 @@ mod tests {
         assert!(countdown_may_run(true, true, PRIMARY_BTN));
     }
 
-    /// Geometry, from the design's own column: the two pills share a baseline and the control row's
-    /// right edge, Watch Credits sits `space::SM` to the LEFT of the primary (so LEFT reaches it),
+    /// Geometry, from the design's own column: the pills share a baseline and Next holds the row's
+    /// right edge, Watch Credits sits to the LEFT of More,
     /// and the still shares the primary's width and edge in a 16:9 frame. Driven through the PURE
     /// half with the two widths supplied, because the impure one measures with `TTF_SizeUTF8` and
     /// the host suite cannot link SDL2_ttf at all.
@@ -423,7 +415,7 @@ mod tests {
         // Representative measured labels, wider than the replaced pair's minimum span.
         let l = layout_of(243.0, 226.0);
         let (n, c, t, cap) = (l.next, l.credits, l.still, l.caption);
-        let right = crate::player_hud::STANDIN_RIGHT;
+        let right = crate::player_hud::CTRL_RIGHT;
         assert_eq!(n.x + n.w, right, "the primary holds the row's right edge");
         assert_eq!(t.x + t.w, right, "…and the still shares it");
         assert_eq!(
@@ -439,9 +431,9 @@ mod tests {
         );
         assert!(
             c.x + c.w < n.x,
-            "Watch Credits is drawn LEFT of the primary, so LEFT reaches it"
+            "Watch Credits remains before More and Next"
         );
-        assert_eq!(n.x - (c.x + c.w), PILL_GAP);
+        assert_eq!(c.x + c.w, crate::player_hud::standin_right(n.w), "Watch Credits leaves room for More");
         assert_eq!(c.y, n.y, "the pair shares a baseline");
         assert_eq!(c.h, n.h);
         // stacked bottom-up with the unequal gaps that do the grouping

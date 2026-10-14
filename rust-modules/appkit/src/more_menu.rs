@@ -81,8 +81,6 @@ use plx_ui::{theme, Rect};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     None,
-    /// Start the existing PlayQueue successor, even when no skip marker is available.
-    NextEpisode,
     /// flip `crate::app::diagnostics`'s overlay on/off
     ToggleStats,
     /// select a rung of the playback-quality ladder ([`plx_media::route::set_quality`])
@@ -180,7 +178,6 @@ impl FormId for Action {
             Action::None => 0,
             Action::ToggleStats => 1,
             Action::SendDiagnostics => 2,
-            Action::NextEpisode => 4,
             Action::SetQuality(Quality::Auto) => 10,
             Action::SetQuality(Quality::Original) => 11,
             Action::SetQuality(Quality::P1080High) => 12,
@@ -251,7 +248,7 @@ fn quality_form(
 impl MoreMenuState {
     fn open_focused(ps: &plx_media::route::PlaybackSession, quality: Option<plx_media::route::Quality>) -> Self {
         let forced = plx_media::route::forced_direct_play(ps);
-        let rows = rows_for(forced, plx_media::route::up_next(ps).is_some());
+        let rows = rows_for(forced);
         let current = plx_media::route::quality();
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true; // a short action list — BODY labels, like the profile menu
@@ -352,7 +349,7 @@ impl MoreMenuState {
     /// follows, and the card animates to it ([`Self::update`]). Returns whether it rebuilt.
     pub fn refresh(&mut self, ps: &plx_media::route::PlaybackSession) -> bool {
         let forced = plx_media::route::forced_direct_play(ps);
-        self.refresh_to(ps, forced, rows_for(forced, plx_media::route::up_next(ps).is_some()), plx_media::route::quality())
+        self.refresh_to(ps, forced, rows_for(forced), plx_media::route::quality())
     }
 
     /// [`Self::refresh`] against explicit answers (what a test or a probe supplies in place of the
@@ -449,8 +446,7 @@ impl MoreMenuState {
         }
     }
 
-    /// Bottom-right, above the control row — anchored to the `…` disc that opened it, the way the
-    /// track menu is anchored to the pair beside it. Shares the track menu's right margin
+    /// Bottom-right, above the control row. Shares the track menu's right margin
     /// (`player_hud::CTRL_RIGHT`, the discs' own edge) and its bottom edge, so opening one after the
     /// other does not make the panel hop. This is the NATURAL (layout) rect, cached against the
     /// table's `layout_rev`; [`Self::shown_rect`] is what is on screen while the card resizes.
@@ -619,9 +615,8 @@ where
 /// **`forced` (Force Direct Play) drops the Quality section entirely.** Every rung is a request for
 /// the server to convert, and Force forbids conversion, so under it no rung can change what plays:
 /// a row that cannot change the outcome is not offered (the same rule as the failure read-out's
-/// `player::failure_actions`). Next Episode requires a queue successor. Pure over these facts so
-/// both shapes are testable without a session.
-fn rows_for(forced: bool, has_next: bool) -> Vec<Action> {
+/// `player::failure_actions`). Pure over the flag so both shapes are testable without a session.
+fn rows_for(forced: bool) -> Vec<Action> {
     let mut v: Vec<Action> = if forced {
         Vec::new()
     } else {
@@ -630,9 +625,6 @@ fn rows_for(forced: bool, has_next: bool) -> Vec<Action> {
             .map(|q| Action::SetQuality(*q))
             .collect()
     };
-    if has_next {
-        v.push(Action::NextEpisode);
-    }
     v.push(Action::ToggleStats);
     if plx_platform::labcfg::menu_row_enabled() {
         v.push(Action::SendDiagnostics);
@@ -642,7 +634,6 @@ fn rows_for(forced: bool, has_next: bool) -> Vec<Action> {
 
 fn label(a: Action) -> std::borrow::Cow<'static, str> {
     match a {
-        Action::NextEpisode => plx_platform::i18n::msg::widgets_next_episode().into(),
         Action::ToggleStats => plx_platform::i18n::msg::widgets_menu_stats().into(),
         // the rung names itself — rate and frame in one string, because the row already carries
         // the picker's leading mark (see this module's doc)
@@ -679,7 +670,7 @@ fn is_on(a: Action) -> bool {
     match a {
         Action::ToggleStats => stats_on(),
         // a rung is not a switch — see `row_for`, which gives it the leading mark instead
-        Action::SetQuality(_) | Action::NextEpisode | Action::SendDiagnostics | Action::None => false,
+        Action::SetQuality(_) | Action::SendDiagnostics | Action::None => false,
     }
 }
 
@@ -719,7 +710,6 @@ fn quality_detail(q: plx_media::route::Quality, source_decodable: bool) -> &'sta
 fn row_for(ps: &plx_media::route::PlaybackSession, a: Action) -> Row {
     match a {
         Action::SetQuality(q) => Row::new(label(a)).detail(quality_detail(q, plx_media::route::source_decodable(ps))),
-        Action::NextEpisode => Row::new(label(a)),
         _ => Row::new(label(a)).toggle(is_on(a)),
     }
 }
@@ -792,7 +782,7 @@ mod tests {
 
     #[test]
     fn every_row_has_a_label() {
-        for a in rows_for(false, true) {
+        for a in rows_for(false) {
             assert!(!label(a).is_empty(), "{a:?} would draw a blank row");
         }
         // The full persisted ladder must keep finished UI copy even if the readiness gate is
@@ -819,7 +809,7 @@ mod tests {
     /// A menu ROOT built from the row list, without a `PlaybackSession` beyond the default one.
     fn menu(forced: bool, current: plx_media::route::Quality) -> MoreMenuState {
         let ps = plx_media::route::PlaybackSession::default();
-        let rows = rows_for(forced, false);
+        let rows = rows_for(forced);
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.table.compact = true;
         form.set_or_open(root_form(&ps, &rows, forced, current), None);
@@ -856,31 +846,16 @@ mod tests {
     fn a_focused_row_commits_its_own_action() {
         let ps = plx_media::route::PlaybackSession::default();
         let mut st = menu(false, Quality::P1080);
-        for a in rows_for(false, false).into_iter().filter(|a| !matches!(a, Action::SetQuality(_))) {
+        for a in rows_for(false).into_iter().filter(|a| !matches!(a, Action::SetQuality(_))) {
             st.focus_key(a.key().0);
             assert_eq!(st.on_ok(&ps), MoreOk::Action(a));
         }
         let mut st = quality_page(Quality::P1080);
-        for a in rows_for(false, false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
+        for a in rows_for(false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
             st.focus_key(a.key().0);
             // exactly the action the flat ladder reported: `app::playback::apply_more_action` is
             // the one place a `SetQuality` is performed (`route::set_quality`)
             assert_eq!(st.on_ok(&ps), MoreOk::Action(a), "{a:?}");
-        }
-    }
-
-    #[test]
-    fn next_episode_appears_only_with_a_successor_and_activates_by_identity() {
-        let ps = plx_media::route::PlaybackSession::default();
-        for forced in [false, true] {
-            let mut st = menu(forced, Quality::P1080);
-            assert!(!st.focus_key(Action::NextEpisode.key().0), "no successor offers no action");
-            assert!(st.refresh_to(&ps, forced, rows_for(forced, true), Quality::P1080));
-            assert!(st.focus_key(Action::NextEpisode.key().0), "a successor remains available under Force Direct Play");
-            assert_eq!(st.on_ok(&ps), MoreOk::Action(Action::NextEpisode));
-            assert!(st.refresh_to(&ps, forced, rows_for(forced, false), Quality::P1080));
-            assert!(!st.focus_key(Action::NextEpisode.key().0));
-            assert_ne!(st.on_ok(&ps), MoreOk::Action(Action::NextEpisode), "a vanished successor cannot retain its action");
         }
     }
 
@@ -1000,7 +975,7 @@ mod tests {
     #[test]
     fn a_reordered_menu_resolves_every_key_to_the_same_action() {
         let ps = plx_media::route::PlaybackSession::default();
-        let mut rows = rows_for(false, false);
+        let mut rows = rows_for(false);
         rows.reverse();
         let mut form = FormTable::new(plx_ui::table_screen::BAND_BASE);
         form.set(quality_form(&ps, &rows, Quality::Auto), None);
@@ -1012,7 +987,7 @@ mod tests {
             pages: PageStack::new(),
             motion: PanelMotion::new(),
         };
-        for a in rows_for(false, false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
+        for a in rows_for(false).into_iter().filter(|a| matches!(a, Action::SetQuality(_))) {
             let i = st.form.index_of_key(a.key()).expect("every row keeps its key");
             assert_eq!(st.form.id_at(i), Some(&MoreRow::Act(a)));
             match st.form.activate(i) {
@@ -1027,7 +1002,7 @@ mod tests {
     /// built from, so a rung added on the wrong side of the split would reach the Options section.
     #[test]
     fn every_quality_rung_sits_ahead_of_the_stats_toggle() {
-        let rows = rows_for(false, true);
+        let rows = rows_for(false);
         let stats_i = rows
             .iter()
             .position(|a| *a == Action::ToggleStats)
@@ -1047,7 +1022,7 @@ mod tests {
     #[test]
     fn forced_direct_play_offers_no_quality_row_and_lands_on_the_first_option() {
         let ps = plx_media::route::PlaybackSession::default();
-        let forced = rows_for(true, false);
+        let forced = rows_for(true);
         assert!(
             !forced.iter().any(|a| matches!(a, Action::SetQuality(_))),
             "forced direct play must not offer a quality rung: {forced:?}"
@@ -1055,7 +1030,7 @@ mod tests {
         assert_eq!(forced.first(), Some(&Action::ToggleStats));
         assert!(!quality_offered(&forced, true));
         assert!(!quality_offered(&[Action::ToggleStats], false), "an empty ladder offers no page to open");
-        assert!(quality_offered(&rows_for(false, false), false));
+        assert!(quality_offered(&rows_for(false), false));
         for q in plx_media::route::QUALITY_LADDER {
             let mut st = menu(true, q);
             assert!(st.form.index_of(&MoreRow::OpenQuality).is_none());
@@ -1063,7 +1038,7 @@ mod tests {
             assert_eq!(st.sel(), 0);
         }
         // not forced: the ladder is unchanged, in order, ahead of Options
-        let open = rows_for(false, false);
+        let open = rows_for(false);
         let ladder: Vec<Action> = open
             .iter()
             .copied()
@@ -1111,7 +1086,7 @@ mod tests {
     fn quality_becoming_unavailable_pops_the_page_to_the_root() {
         let ps = plx_media::route::PlaybackSession::default();
         let mut st = quality_page(Quality::P1080);
-        assert!(st.refresh_to(&ps, true, rows_for(true, false), Quality::P1080));
+        assert!(st.refresh_to(&ps, true, rows_for(true), Quality::P1080));
         assert_eq!(st.page(), None);
         assert_eq!(st.form.table.title(), None);
         assert!(!st.transitioning(), "a page that vanished does not slide away");
@@ -1387,7 +1362,7 @@ mod focus_tests {
         use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
         let ps = plx_media::route::PlaybackSession::default();
         let mut out = Vec::new();
-        let rows = rows_for(false, true);
+        let rows = rows_for(false);
         let mut check = |tag: &str, form: &MoreTable| {
             out.extend(form.table.menu_cap_failure(&plx_base::fontcov::advances::ShippedMeasure, tag));
             out.extend(form.table.app_fit_failures(plx_ui::table::MENU_MAX_W, tag));
@@ -1408,7 +1383,7 @@ mod focus_tests {
             }
             // the forced root (Options only)
             let mut forced = MoreMenuState::new(&ps);
-            forced.form.set(root_form(&ps, &rows_for(true, true), true, plx_media::route::Quality::Auto), None);
+            forced.form.set(root_form(&ps, &rows_for(true), true, plx_media::route::Quality::Auto), None);
             check(language.tag(), &forced.form);
         }
         plx_ui::table::assert_no_fit_failures(&out);

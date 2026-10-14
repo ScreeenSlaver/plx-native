@@ -624,7 +624,7 @@ pub struct Session {
     pub subtitle_position: SubtitlePosition,
     /// **What the player does when an episode with a successor reaches its credits** — see
     /// [`NextEpisodeMode`]. Install-wide like [`Session::playback_quality`]. Absence is
-    /// Countdown, which is what every build before the field did. Skipped at the default so a
+    /// AfterCredits in this personal build, preserving outro scenes through end-of-stream. Skipped at the default so a
     /// session predating this field — committed replay fixtures included — serializes exactly as
     /// it did before.
     #[serde(default, deserialize_with = "de_soft_next_episode_mode", skip_serializing_if = "is_default_next_episode_mode")]
@@ -788,7 +788,7 @@ impl Default for CanonicalSessionPreferences {
             subtitle_tone: SubtitleTone::White,
             subtitle_size: SubtitleSize::Medium,
             subtitle_position: SubtitlePosition::Low,
-            next_episode_mode: NextEpisodeMode::Countdown,
+            next_episode_mode: NextEpisodeMode::AfterCredits,
             skip_interval: SkipInterval::Seconds10,
             deck_press: DeckPress::Details,
             plaintext_consent: Vec::new(),
@@ -1305,15 +1305,15 @@ impl SubtitlePosition {
 }
 
 /// What the player does when an episode that has a successor reaches its credits — install-wide,
-/// like [`SubtitleTone`]. Absence is `Countdown`, the Up Next tile and its 10 s countdown every
-/// build before this preference showed. `AfterCredits` shows nothing during the credits and
-/// starts the next episode only when the stream ends; `Off` shows nothing and, at the end of the
-/// stream, leaves the player as a movie does. A show's last episode and a movie are unaffected.
+/// like [`SubtitleTone`]. This personal build defaults to `AfterCredits`, starting the next episode
+/// only when the complete stream ends. `Countdown` offers the Up Next countdown during final
+/// credits; `Off` leaves the player at stream end. The direct Next Episode button remains available
+/// whenever a successor is queued. A show's last episode and a movie are unaffected.
 #[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NextEpisodeMode {
-    #[default]
     #[serde(rename = "countdown")]
     Countdown,
+    #[default]
     #[serde(rename = "after_credits")]
     AfterCredits,
     #[serde(rename = "off")]
@@ -1328,7 +1328,7 @@ impl NextEpisodeMode {
         NextEpisodeMode::Off,
     ];
 
-    /// An in-memory index back to a mode — out of range is `Countdown`, for the reason
+    /// An in-memory index back to a mode — out of range is `AfterCredits`, for the reason
     /// [`SubtitleTone::from_index`] gives: the ladder can grow or shrink.
     pub fn from_index(i: u8) -> NextEpisodeMode {
         Self::LADDER.get(i as usize).copied().unwrap_or_default()
@@ -2337,13 +2337,13 @@ fn is_default_subtitle_position(position: &SubtitlePosition) -> bool {
     *position == SubtitlePosition::default()
 }
 
-/// The next-episode mode is a preference too: a spelling this build does not know degrades to Countdown.
+/// An unknown next-episode preference preserves the complete episode, including outro scenes.
 fn de_soft_next_episode_mode<'de, D>(d: D) -> Result<NextEpisodeMode, D::Error>
 where
     D: Deserializer<'de>,
 {
     let Ok(v) = serde_json::Value::deserialize(d) else {
-        return Ok(NextEpisodeMode::Countdown);
+        return Ok(NextEpisodeMode::default());
     };
     Ok(serde_json::from_value::<NextEpisodeMode>(v).unwrap_or_default())
 }
@@ -5644,7 +5644,7 @@ mod next_episode_mode_tests {
     use super::*;
 
     #[test]
-    fn absent_or_malformed_is_countdown() {
+    fn absent_or_malformed_preserves_the_full_episode() {
         for value in [
             serde_json::json!({}),
             serde_json::json!({"next_episode_mode": null}),
@@ -5653,14 +5653,15 @@ mod next_episode_mode_tests {
         ] {
             let session: Session = serde_json::from_value(value.clone())
                 .unwrap_or_else(|e| panic!("{value}: a bad preference must not fail the session: {e}"));
-            assert_eq!(session.next_episode_mode(), NextEpisodeMode::Countdown, "{value}");
+            assert_eq!(session.next_episode_mode(), NextEpisodeMode::AfterCredits, "{value}");
         }
     }
 
     #[test]
     fn the_default_is_not_serialized() {
         let session = Session::default();
-        assert_eq!(session.next_episode_mode(), NextEpisodeMode::Countdown);
+        assert_eq!(session.next_episode_mode(), NextEpisodeMode::AfterCredits);
+        assert_eq!(CanonicalSessionPreferences::default().next_episode_mode, NextEpisodeMode::AfterCredits);
         assert!(!serde_json::to_string(&session).unwrap().contains("next_episode_mode"));
         let prefs = serde_json::to_string(&split_public(&session).unwrap().preferences).unwrap();
         assert!(!prefs.contains("next_episode_mode"), "{prefs}");
@@ -5668,7 +5669,7 @@ mod next_episode_mode_tests {
 
     #[test]
     fn a_pick_round_trips_through_both_formats() {
-        for mode in [NextEpisodeMode::AfterCredits, NextEpisodeMode::Off] {
+        for mode in [NextEpisodeMode::Countdown, NextEpisodeMode::Off] {
             let session = Session::default().with_next_episode_mode(mode);
             let json = serde_json::to_string(&session).unwrap();
             assert!(json.contains("next_episode_mode"), "{json}");

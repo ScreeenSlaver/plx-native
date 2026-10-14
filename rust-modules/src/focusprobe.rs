@@ -285,8 +285,8 @@ fn push_player(ps: &plx_media::route::PlaybackSession, s: &mut String, overlay: 
     // `upnext` is the PLAYER INSTANCE's countdown since phase 9, so it arrives on `content` with
     // the panels' fields rather than being read off a module global here.
     let slot = match ctrl {
-        ControlSlot::Discs => "discs",
-        ControlSlot::Skip(_) => "skip",
+        ControlSlot::Discs | ControlSlot::DiscsWithNext => "discs",
+        ControlSlot::Skip(_) | ControlSlot::SkipWithNext(_) => "skip",
         ControlSlot::UpNext(_) => "upnext",
     };
     // `hidden` is `player_hud::transport_hidden()`, read here for the reason

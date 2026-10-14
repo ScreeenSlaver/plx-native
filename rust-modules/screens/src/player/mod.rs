@@ -388,7 +388,9 @@ impl PlayerScreen {
         ));
         mix(match self.slot {
             ControlSlot::Discs => 1,
+            ControlSlot::DiscsWithNext => 4,
             ControlSlot::Skip(_) => 2,
+            ControlSlot::SkipWithNext(_) => 5,
             ControlSlot::UpNext(_) => 3,
         });
         mix(match plx_appkit::player_hud::busy(ps) {
@@ -1162,13 +1164,15 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
         });
         // Every item of whatever occupies the row, including More beside either stand-in.
         let row_len = self.slot.items().max(1) as usize;
+        let row_extent = (0..row_len).filter_map(|i| self.slot.item_rect(&self.row, i as i32, cx.measure))
+            .reduce(|a, b| a.union(b)).unwrap_or_else(player_hud::ctrl_row_hit_rect);
         out.push(GroupSpec {
             id: GROUP_ROW,
             kind: GroupKind::Row { wrap: false },
             seat: Seat::First,
             reachable: AxisMask::BOTH,
             edge: [EdgeRule::Screen; 4],
-            extent: player_hud::ctrl_row_hit_rect(),
+            extent: row_extent,
             len: row_len,
             elem: plx_ui::screen::ElemKind::Control,
         });
@@ -1831,9 +1835,12 @@ mod step_ladder_tests {
         let row = |n: u32| (0..n).map(|i| ELEM_ROW_BASE + i).collect::<Vec<_>>();
         let failure_n = player_hud::FailureReadout::now(TestHost::session(&cx())).actions().len() as u32;
         assert!(failure_n >= 1, "Back is always offered");
-        let cases: [(&str, ControlSlot, Busy, Vec<u32>); 4] = [
+        let queued_skip = player_hud::slot_for(Some(marker(MarkerKind::Intro)), true, plx_media::route::NextEpisodeMode::AfterCredits);
+        let cases: [(&str, ControlSlot, Busy, Vec<u32>); 6] = [
             ("discs", ControlSlot::Discs, Busy::None, [row(3), vec![ELEM_TAB_BASE]].concat()),
+            ("discs with next", ControlSlot::DiscsWithNext, Busy::None, [row(4), vec![ELEM_TAB_BASE]].concat()),
             ("skip", skip, Busy::None, [row(2), vec![ELEM_TAB_BASE]].concat()),
+            ("skip with next", queued_skip, Busy::None, [row(3), vec![ELEM_TAB_BASE]].concat()),
             ("up next", up_next, Busy::None, [row(3), vec![ELEM_TAB_BASE]].concat()),
             ("failed", ControlSlot::Discs, failed, (0..failure_n).map(|i| ELEM_FAILURE_BASE + i).collect()),
         ];

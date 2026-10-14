@@ -969,6 +969,7 @@ pub(crate) unsafe fn construct(
     plx_media::route::restore_subtitle_size(session.subtitle_size());
     plx_media::route::restore_subtitle_position(session.subtitle_position());
     plx_media::route::restore_next_episode_mode(session.next_episode_mode());
+    plx_base::eventlog::log(&format!("next episode mode: {:?}", session.next_episode_mode()));
     plx_media::route::restore_skip_interval(session.skip_interval());
     plx_media::route::restore_deck_press(session.deck_press());
     // The subtitle tone rides the same file and the same moment: a preference, restored once.

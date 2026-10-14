@@ -170,6 +170,7 @@ pub struct Engine {
     /// re-place happens exactly once if the demuxer publishes the real one later. 0 = never placed.
     pub placed_src: (c_int, c_int),
     pub eos_pushed: bool, // Kodi VIDEO_DRAIN: pushEOS() sent once at true EOF
+    pub(super) eos_tail: super::pump::EosTail,
     pub rebase_pending: bool, // g_rebase_pending
     // In-place seek only: keyframes this far AHEAD of the seek target are stale frames the demuxer
     // produced from its pre-flush read position before the reopen+av_seek won the race (playback
@@ -1381,6 +1382,7 @@ fn start_bufferfeed_inner(
         video_info_sent: false,
         placed_src: (0, 0),
         eos_pushed: false,
+        eos_tail: Default::default(),
         // if a seek is armed for the FIRST open (resume, or reload_at), rebase the first
         // post-seek keyframe to fed-pts 0 so the pipeline sees a 0-based timeline identical
         // to fresh play (disp_base carries the content offset). Plain fresh play leaves this
@@ -2502,7 +2504,8 @@ fn feed_stream(mt: &MainThread, eng: &mut Engine) {
                 // true EOF (producer done + video lane drained): signal end-of-stream ONCE so the
                 // pipeline drains its last frames instead of hanging on them (Kodi keys EOS to the
                 // video drain). Keyed on the video lane only.
-                if eof != 0 && !eng.eos_pushed && eng.stage >= Stage::Streaming {
+                if eof != 0 && !eng.eos_pushed && eng.stage >= Stage::Streaming
+                    && !eng.rebase_pending && !eng.flushed {
                     unsafe { sink().push_eos(mt) };
                     eng.eos_pushed = true;
                     log("EOS pushed at true EOF");
@@ -3408,6 +3411,7 @@ mod prime_livelock_tests {
             video_info_sent: true,
             placed_src: (0, 0),
             eos_pushed: false,
+            eos_tail: Default::default(),
             rebase_pending: false,
             rebase_drops: 0,
             seek_armed_at: 0,

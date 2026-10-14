@@ -487,14 +487,14 @@ const BTN_N: i32 = 3;
 /// **One array for all three slot occupants**, not one per module. The transport discs, the Skip
 /// pill and the Up Next pair are the same row at the same right edge, only ever one at a time, and
 /// the cursor walking them is `hud_nav.btn` for all three ([`ControlSlot::items`]) — so the pop is a
-/// property of that row and not of whichever module happens to draw it this frame. `BTN_N` 3 is the
-/// widest occupant. `up_next` and `skip_pill` read theirs through [`row_pop`].
+/// property of that row and not of whichever module happens to draw it this frame. The widest
+/// occupant has three discs plus Next Episode. `up_next` and `skip_pill` share these springs.
 ///
 /// A field of [`TransportRow`], which the player's instance owns: the HUD keeps no view struct
 /// — it is drawn entirely from the caller's arguments — so this and the resume clock beside it are
 /// the whole of the route's retained motion state, and phase 9 gave them the one owner the rest of
 /// the route already has.
-pub type RowPop = plx_ui::widgets::CtlPop<{ BTN_N as usize }>;
+pub type RowPop = plx_ui::widgets::CtlPop<{ (BTN_N + 1) as usize }>;
 
 /// **Everything the transport row remembers between frames**: the control row's per-item focus pop
 /// and the paused→playing edge the state read-out's `Play` mark is timed from.
@@ -608,11 +608,11 @@ impl TransportRow {
     }
 }
 
-/// Index of the `…` overflow disc within the row — the LAST one. Exported because `app.rs` routes
+/// Index of the `…` overflow disc within the ordinary disc group. Exported because `app.rs` routes
 /// its OK and its click, and a second literal `2` over there is exactly the drift `ControlSlot`
 /// was introduced to stop.
 pub const BTN_MORE: i32 = BTN_N - 1;
-/// Skip/Up Next end before the persistent More disc, with the same gap as the ordinary row.
+/// Skip/Up Next's right edge before More when no successor button is reserved.
 pub const STANDIN_RIGHT: f32 = CTRL_RIGHT - BTN_S - BTN_GAP;
 /// Width the complete disc row occupies.
 pub const CTRL_ROW_W: f32 = 3.0 * BTN_S + 2.0 * BTN_GAP;
@@ -625,7 +625,7 @@ const STANDIN_MIN_W: f32 = 2.0 * BTN_S + BTN_GAP;
 ///
 /// The measured width is memoised per label, avoiding repeated capability calls and string
 /// preparation for fixed labels in addition to the native font-metric cache.
-pub fn ctrl_slot(row: &mut TransportRow, label: &str, measure: &dyn plx_machine::machine::Measure) -> Rect {
+pub fn ctrl_slot(row: &mut TransportRow, label: &str, right: f32, measure: &dyn plx_machine::machine::Measure) -> Rect {
     let memo = &mut row.widths;
     let w = match memo.iter().find(|(l, _)| l == label) {
         Some((_, w)) => *w,
@@ -638,7 +638,7 @@ pub fn ctrl_slot(row: &mut TransportRow, label: &str, measure: &dyn plx_machine:
             measured
         }
     };
-    Rect::new(STANDIN_RIGHT - w, CTRL_Y, w, CTRL_H)
+    Rect::new(right - w, CTRL_Y, w, CTRL_H)
 }
 
 /// [`ctrl_slot`]'s width without writing the memo — the cached width when the draw has measured
@@ -662,8 +662,11 @@ fn ctrl_slot_measure(label: &str, measure: &dyn plx_machine::machine::Measure) -
 pub enum ControlSlot {
     /// the ordinary Subtitles + Audio pair
     Discs,
+    /// The track discs, More, and a persistent successor button.
+    DiscsWithNext,
     /// a marker segment is under the playhead
     Skip(crate::skip_pill::Prompt),
+    SkipWithNext(crate::skip_pill::Prompt),
     /// …and the show has another episode queued, which outranks skipping the credits. Carries the
     /// segment for the same reason `Skip` does — so the row has a stable IDENTITY.
     UpNext(plx_data::metadata::Marker),
@@ -675,21 +678,35 @@ impl ControlSlot {
     pub fn items(self) -> c_int {
         match self {
             ControlSlot::Discs => BTN_N,
-            // Watch Credits + Next Episode + More
+            ControlSlot::DiscsWithNext => BTN_N + 1,
+            // Watch Credits / Skip + More + Next Episode
             ControlSlot::UpNext(_) => 3,
             ControlSlot::Skip(_) => 2,
+            ControlSlot::SkipWithNext(_) => 3,
         }
     }
-    /// More keeps a fixed screen position while its row index follows the current occupants.
+    pub fn has_next(self) -> bool {
+        matches!(self, Self::DiscsWithNext | Self::SkipWithNext(_) | Self::UpNext(_))
+    }
+    pub fn next_btn(self) -> Option<c_int> {
+        self.has_next().then(|| self.items() - 1)
+    }
+    pub fn is_next(self, idx: c_int) -> bool {
+        self.next_btn() == Some(idx)
+    }
+    /// More immediately precedes Next when queued; its index follows the current occupants.
     pub fn more_btn(self) -> c_int {
-        self.items() - 1
+        self.items() - 1 - if self.has_next() { 1 } else { 0 }
     }
     pub fn is_more(self, idx: c_int) -> bool {
         idx == self.more_btn()
     }
-    /// Keep a chosen More control across a row replacement, whose indices may differ.
-    pub fn remap_more(self, now: Self, focused: bool, btn: c_int) -> Option<c_int> {
-        (focused && self.is_more(btn)).then(|| now.more_btn())
+    /// Keep a chosen persistent control across a row replacement, whose indices may differ.
+    pub fn remap_persistent(self, now: Self, focused: bool, btn: c_int) -> Option<c_int> {
+        if !focused { return None; }
+        if self.is_more(btn) { Some(now.more_btn()) }
+        else if self.is_next(btn) { now.next_btn() }
+        else { None }
     }
     /// Where the focus ring parks when this row APPEARS. It is 0 everywhere except Up Next, whose
     /// primary is the right-hand pill — and getting that wrong is not cosmetic: the countdown's
@@ -703,7 +720,7 @@ impl ControlSlot {
     }
     /// whether the Subtitles/Audio discs are the current occupant
     pub fn is_discs(self) -> bool {
-        matches!(self, ControlSlot::Discs)
+        matches!(self, ControlSlot::Discs | ControlSlot::DiscsWithNext)
     }
     /// Which SEGMENT this row is offering, if any — the row's identity for "have I already offered
     /// this?". Deliberately not the `ControlSlot` itself: `active_marker` is gated on `is_playing`,
@@ -712,8 +729,8 @@ impl ControlSlot {
     /// slot, it was — and every flicker re-raised the HUD over an intro the user was just watching.
     pub fn offer(self) -> Option<(plx_data::metadata::MarkerKind, i64)> {
         match self {
-            ControlSlot::Discs => None,
-            ControlSlot::Skip(pr) => Some((pr.marker.kind, pr.marker.start_ms)),
+            ControlSlot::Discs | ControlSlot::DiscsWithNext => None,
+            ControlSlot::Skip(pr) | ControlSlot::SkipWithNext(pr) => Some((pr.marker.kind, pr.marker.start_ms)),
             ControlSlot::UpNext(m) => Some((m.kind, m.start_ms)),
         }
     }
@@ -728,21 +745,29 @@ impl ControlSlot {
         if idx < 0 || idx >= self.items() {
             return None;
         }
-        if self.is_more(idx) {
-            return Some(disc_hit_rect(BTN_MORE));
-        }
+        let next_w = self.next_width(row, measure);
+        if self.is_next(idx) { return Some(next_button_rect(next_w)); }
+        if self.is_more(idx) { return Some(disc_hit_rect_at(BTN_MORE, next_w)); }
         Some(match self {
-            ControlSlot::Discs => disc_hit_rect(idx),
-            ControlSlot::Skip(pr) => {
+            ControlSlot::Discs | ControlSlot::DiscsWithNext => disc_hit_rect_at(idx, next_w),
+            ControlSlot::Skip(pr) | ControlSlot::SkipWithNext(pr) => {
                 let w = ctrl_slot_w(row, pr.label(), measure);
-                Rect::new(STANDIN_RIGHT - w, CTRL_Y, w, CTRL_H)
+                Rect::new(standin_right(next_w) - w, CTRL_Y, w, CTRL_H)
             }
-            ControlSlot::UpNext(_) => {
-                let l = crate::up_next::layout_peek(row, measure);
-                if idx == crate::up_next::BTN_NEXT { l.next } else { l.credits }
-            }
+            ControlSlot::UpNext(_) => crate::up_next::layout_peek(row, measure).credits,
         })
     }
+    pub fn next_width(self, row: &TransportRow, measure: &dyn plx_machine::machine::Measure) -> f32 {
+        if self.has_next() { ctrl_slot_w(row, plx_platform::i18n::msg::widgets_next_episode(), measure) }
+        else { 0.0 }
+    }
+}
+
+fn next_offset(next_w: f32) -> f32 { if next_w > 0.0 { next_w + BTN_GAP } else { 0.0 } }
+pub fn next_button_rect(next_w: f32) -> Rect { Rect::new(CTRL_RIGHT - next_w, CTRL_Y, next_w, CTRL_H) }
+pub fn standin_right(next_w: f32) -> f32 { STANDIN_RIGHT - next_offset(next_w) }
+fn disc_hit_rect_at(idx: c_int, next_w: f32) -> Rect {
+    Rect::new(btn_x(idx) - next_offset(next_w), BTN_Y, BTN_S, BTN_S)
 }
 
 /// PURE precedence: given the segment under the playhead and whether the queue has a successor,
@@ -754,8 +779,8 @@ impl ControlSlot {
 /// credits segment is followed by more of the episode, so it keeps the Skip Credits pill.
 ///
 /// The Next episode preference only changes the offer for that final-credits-with-a-successor
-/// case: `AfterCredits` and `Off` offer nothing there (the discs stay), because the successor is
-/// not announced until the stream ends, if then. The last episode and films keep Skip Credits.
+/// case: `AfterCredits` and `Off` retain the discs and manual Next button without a credits offer.
+/// The last episode and films keep Skip Credits.
 pub fn slot_for(marker: Option<plx_data::metadata::Marker>, has_next: bool, mode: plx_media::route::NextEpisodeMode) -> ControlSlot {
     match marker {
         Some(m) => {
@@ -763,13 +788,13 @@ pub fn slot_for(marker: Option<plx_data::metadata::Marker>, has_next: bool, mode
             if has_next && m.kind == plx_data::metadata::MarkerKind::Credits && m.final_seg {
                 match mode {
                     plx_media::route::NextEpisodeMode::Countdown => ControlSlot::UpNext(m),
-                    plx_media::route::NextEpisodeMode::AfterCredits | plx_media::route::NextEpisodeMode::Off => ControlSlot::Discs,
+                    plx_media::route::NextEpisodeMode::AfterCredits | plx_media::route::NextEpisodeMode::Off => ControlSlot::DiscsWithNext,
                 }
             } else {
-                ControlSlot::Skip(pr)
+                if has_next { ControlSlot::SkipWithNext(pr) } else { ControlSlot::Skip(pr) }
             }
         }
-        None => ControlSlot::Discs,
+        None => if has_next { ControlSlot::DiscsWithNext } else { ControlSlot::Discs },
     }
 }
 
@@ -810,7 +835,8 @@ pub fn slot(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::Me
 /// scrubber the same frame it arrives, so focus can never rest on a disc and OK on one is
 /// unreachable by remote. The pointer path never saw it, which is why the on-device suite did not.
 pub fn standin_left_the_ring(was: ControlSlot, now: ControlSlot, focused: bool, btn: c_int) -> bool {
-    !was.is_discs() && now.is_discs() && focused && !was.is_more(btn)
+    focused && ((was.is_next(btn) && !now.has_next())
+        || (!was.is_discs() && now.is_discs() && !was.is_more(btn) && !was.is_next(btn)))
 }
 
 /// The bottom scrim's height — the transport's dark ground, transparent at its top edge and
@@ -1363,12 +1389,12 @@ fn btn_x(idx: i32) -> f32 {
 /// Shares the button rects with draw_hud; stand-in pills are registered separately.
 ///
 /// `slot` is passed in rather than re-derived: a stand-in hides the track discs but retains More.
-pub fn icon_hit(slot: ControlSlot, cx: f32, cy: f32) -> Option<i32> {
+pub fn icon_hit(slot: ControlSlot, next_w: f32, cx: f32, cy: f32) -> Option<i32> {
     if cy < BTN_Y || cy > BTN_Y + BTN_S {
         return None;
     }
     (0..BTN_N).filter(|&idx| slot.is_discs() || idx == BTN_MORE).find(|&idx| {
-        let x = btn_x(idx);
+        let x = btn_x(idx) - next_offset(next_w);
         cx >= x && cx <= x + BTN_S
     }).map(|idx| if idx == BTN_MORE { slot.more_btn() } else { idx })
 }
@@ -1871,17 +1897,20 @@ pub fn draw_hud(
 
         // The right control row, from the slot the CALLER resolved — so what is drawn and what a
         // keypress activates are the same value, not two derivations of it.
+        let next_w = if slot.has_next() {
+            ctrl_slot(row, plx_platform::i18n::msg::widgets_next_episode(), CTRL_RIGHT, measure).w
+        } else { 0.0 };
         match slot {
             ControlSlot::UpNext(_) => {
                 crate::up_next::draw(ps, row, up, p, focus == 1, btn, now, measure);
             }
-            ControlSlot::Skip(pr) => {
-                crate::skip_pill::draw(row, p, pr, focus == 1 && btn == 0, measure);
+            ControlSlot::Skip(pr) | ControlSlot::SkipWithNext(pr) => {
+                crate::skip_pill::draw(row, p, pr, focus == 1 && btn == 0, standin_right(next_w), measure);
             }
-            ControlSlot::Discs => {
+            ControlSlot::Discs | ControlSlot::DiscsWithNext => {
                 for i in 0..BTN_N {
                     let pop = row.scale(i);
-                    TransportButton::new(i, Rect::new(btn_x(i), BTN_Y, BTN_S, BTN_S))
+                    TransportButton::new(i, disc_hit_rect_at(i, next_w))
                         .focused(focus == 1 && btn == i)
                         // The whole control row stands on the VIDEO PLANE — see `ControlGround`. It is
                         // the HUD's own bottom ramp (drawn at the top of this function) that makes the
@@ -1895,11 +1924,21 @@ pub fn draw_hud(
         }
 
         if !slot.is_discs() {
-            TransportButton::new(BTN_MORE, Rect::new(btn_x(BTN_MORE), BTN_Y, BTN_S, BTN_S))
+            TransportButton::new(BTN_MORE, disc_hit_rect_at(BTN_MORE, next_w))
                 .focused(focus == 1 && slot.is_more(btn))
                 .ground(ControlGround::Unkeyed)
                 .scale(row.scale(slot.more_btn()))
                 .draw(&e, p);
+        }
+        // Up Next paints this same far-right button with its optional countdown fill.
+        if slot.has_next() && !matches!(slot, ControlSlot::UpNext(_)) {
+            if let Ok(label) = CString::new(plx_platform::i18n::msg::widgets_next_episode()) {
+                plx_ui::widgets::Button::new(label.as_ptr(), theme::size::BODY, next_button_rect(next_w))
+                    .focused(focus == 1 && slot.is_next(btn))
+                    .ground(ControlGround::Unkeyed)
+                    .scale(row.scale(slot.next_btn().unwrap_or(0)))
+                    .draw(&e, p);
+            }
         }
 
         draw_playbar(p, Playbar::live(ps, busy, focus, row.since_play_ms(now), now), measure);
@@ -2071,7 +2110,7 @@ mod tests {
         for i in 0..BTN_N {
             let cx = btn_x(i) + BTN_S * 0.5;
             assert_eq!(
-                icon_hit(ControlSlot::Discs, cx, cy),
+                icon_hit(ControlSlot::Discs, 0.0, cx, cy),
                 Some(i),
                 "disc {i} centre"
             );
@@ -2111,19 +2150,19 @@ mod tests {
     fn gaps_and_the_row_ends_belong_to_no_disc() {
         let cy = BTN_Y + BTN_S * 0.5;
         assert_eq!(
-            icon_hit(ControlSlot::Discs, btn_x(0) - 1.0, cy),
+            icon_hit(ControlSlot::Discs, 0.0, btn_x(0) - 1.0, cy),
             None,
             "left of the row"
         );
         assert_eq!(
-            icon_hit(ControlSlot::Discs, CTRL_RIGHT + 1.0, cy),
+            icon_hit(ControlSlot::Discs, 0.0, CTRL_RIGHT + 1.0, cy),
             None,
             "right of the row"
         );
         for i in 1..BTN_N {
             let mid = btn_x(i) - BTN_GAP * 0.5;
             assert_eq!(
-                icon_hit(ControlSlot::Discs, mid, cy),
+                icon_hit(ControlSlot::Discs, 0.0, mid, cy),
                 None,
                 "gap before disc {i}"
             );
@@ -2131,12 +2170,12 @@ mod tests {
         // and the band itself is bounded vertically
         let cx = btn_x(0) + BTN_S * 0.5;
         assert_eq!(
-            icon_hit(ControlSlot::Discs, cx, BTN_Y - 1.0),
+            icon_hit(ControlSlot::Discs, 0.0, cx, BTN_Y - 1.0),
             None,
             "above the row"
         );
         assert_eq!(
-            icon_hit(ControlSlot::Discs, cx, BTN_Y + BTN_S + 1.0),
+            icon_hit(ControlSlot::Discs, 0.0, cx, BTN_Y + BTN_S + 1.0),
             None,
             "below the row"
         );
@@ -2147,14 +2186,18 @@ mod tests {
     #[test]
     fn a_stand_in_hides_the_track_discs_but_keeps_more_clickable() {
         let cy = BTN_Y + BTN_S * 0.5;
+        let row = TransportRow::new();
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
         for slot in [
             slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown),
             slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
         ] {
+            let next_w = slot.next_width(&row, &measure);
             for i in 0..BTN_MORE {
-                assert_eq!(icon_hit(slot, btn_x(i) + BTN_S * 0.5, cy), None, "hidden track disc {i}");
+                assert_eq!(icon_hit(slot, next_w, btn_x(i) - next_offset(next_w) + BTN_S * 0.5, cy), None, "hidden track disc {i}");
             }
-            assert_eq!(icon_hit(slot, btn_x(BTN_MORE) + BTN_S * 0.5, cy), Some(slot.more_btn()));
+            let more = slot.item_rect(&row, slot.more_btn(), &measure).unwrap();
+            assert_eq!(icon_hit(slot, next_w, more.cx(), more.cy()), Some(slot.more_btn()));
         }
     }
 
@@ -2167,20 +2210,20 @@ mod tests {
         assert!(slot_for(None, false, NextEpisodeMode::Countdown).is_discs());
         assert!(
             slot_for(None, true, NextEpisodeMode::Countdown).is_discs(),
-            "a queued successor alone changes nothing"
+            "a queued successor keeps the track discs"
         );
-        assert_eq!(slot_for(None, true, NextEpisodeMode::Countdown).items(), BTN_N);
+        assert_eq!(slot_for(None, true, NextEpisodeMode::Countdown).items(), BTN_N + 1);
         assert_eq!(
             slot_for(None, true, NextEpisodeMode::Countdown).primary_btn(),
             0,
             "the discs open on Subtitles"
         );
 
-        // an intro is always Skip, successor or not — "what's next" is an end-of-episode idea
+        // An intro keeps Skip before More and the persistent successor, when one is queued.
         for has_next in [false, true] {
             let slot = slot_for(Some(marker(MarkerKind::Intro, false)), has_next, NextEpisodeMode::Countdown);
-            assert!(matches!(slot, ControlSlot::Skip(p) if p.kind == MarkerKind::Intro));
-            assert_eq!(slot.items(), 2, "Skip + More");
+            assert!(matches!(slot, ControlSlot::Skip(p) | ControlSlot::SkipWithNext(p) if p.kind == MarkerKind::Intro));
+            assert_eq!(slot.items(), if has_next { 3 } else { 2 }, "Skip + More + optional Next");
             assert_eq!(
                 slot.primary_btn(),
                 0,
@@ -2195,7 +2238,7 @@ mod tests {
         // together because they are one fact: a `primary_btn()` of 0 would
         // park the ring on Watch Credits, and `up_next::countdown_may_run` would then disarm the
         // countdown on the frame after it armed — a timer that visibly never runs.
-        assert_eq!(up.items(), 3, "Watch Credits + Next Episode + More");
+        assert_eq!(up.items(), 3, "Watch Credits + More + Next Episode");
         assert_eq!(up.primary_btn(), crate::up_next::BTN_NEXT);
         // …and WITHOUT (a show's last episode) it stays Skip Credits, which is the whole reason
         // both still exist
@@ -2212,7 +2255,7 @@ mod tests {
     fn up_next_needs_a_final_credits_marker() {
         let mid = slot_for(Some(marker(MarkerKind::Credits, false)), true, NextEpisodeMode::Countdown);
         assert!(
-            matches!(mid, ControlSlot::Skip(p) if p.kind == MarkerKind::Credits
+            matches!(mid, ControlSlot::SkipWithNext(p) if p.kind == MarkerKind::Credits
                 && p.action == SkipAction::Seek(2_000 * 1_000_000)),
             "a non-final credits marker offers Skip Credits even with a successor queued"
         );
@@ -2220,12 +2263,16 @@ mod tests {
     }
 
     /// **Next episode: After credits / Off.** During the credits of an episode with a successor the
-    /// control row offers nothing — no Up Next tile (so no countdown and no HUD raise, both of
-    /// which key off the slot), and no Skip Credits pill. Everything else keeps its occupant.
+    /// control row keeps the persistent Next button, without a countdown or Skip Credits pill.
     #[test]
-    fn after_credits_and_off_offer_nothing_during_the_credits() {
+    fn after_credits_and_off_keep_manual_next_without_a_credits_countdown() {
         for mode in [NextEpisodeMode::AfterCredits, NextEpisodeMode::Off] {
-            assert!(slot_for(Some(marker(MarkerKind::Credits, true)), true, mode).is_discs(), "{mode:?}");
+            for marker in [None, Some(marker(MarkerKind::Credits, false)), Some(marker(MarkerKind::Credits, true))] {
+                let slot = slot_for(marker, true, mode);
+                assert!(slot.has_next() && slot.is_next(slot.items() - 1), "{mode:?}: Next remains through an outro scene");
+            }
+            let final_slot = slot_for(Some(marker(MarkerKind::Credits, true)), true, mode);
+            assert!(final_slot.is_discs() && final_slot.offer().is_none(), "{mode:?}: no automatic credits offer");
             // a show's last episode and a movie keep the Skip Credits pill, which finishes the item
             assert!(matches!(
                 slot_for(Some(marker(MarkerKind::Credits, true)), false, mode),
@@ -2234,9 +2281,9 @@ mod tests {
             // a mid-item credits segment and an intro are skippable as ever
             assert!(matches!(
                 slot_for(Some(marker(MarkerKind::Credits, false)), true, mode),
-                ControlSlot::Skip(p) if p.action == SkipAction::Seek(2_000 * 1_000_000)
+                ControlSlot::SkipWithNext(p) if p.action == SkipAction::Seek(2_000 * 1_000_000)
             ));
-            assert!(matches!(slot_for(Some(marker(MarkerKind::Intro, false)), true, mode), ControlSlot::Skip(_)));
+            assert!(matches!(slot_for(Some(marker(MarkerKind::Intro, false)), true, mode), ControlSlot::SkipWithNext(_)));
         }
         assert!(matches!(
             slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
@@ -2292,15 +2339,52 @@ mod tests {
         assert!(!standin_left_the_ring(skip, skip, true, skip.primary_btn()));
 
         let up = slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown);
-        for was in [discs, skip, up] {
-            for now in [discs, skip, up] {
-                let next_btn = was.remap_more(now, true, was.more_btn()).expect("More survives every row");
+        let queued = slot_for(None, true, NextEpisodeMode::AfterCredits);
+        let queued_skip = slot_for(Some(marker(MarkerKind::Intro, false)), true, NextEpisodeMode::AfterCredits);
+        for was in [discs, skip, queued, queued_skip, up] {
+            for now in [discs, skip, queued, queued_skip, up] {
+                let next_btn = was.remap_persistent(now, true, was.more_btn()).expect("More survives every row");
                 assert!(now.is_more(next_btn), "a fresh offer must retain the chosen More action");
                 assert!(!standin_left_the_ring(was, now, true, was.more_btn()), "vanishing markers keep More focused");
+                if let (Some(was_next), Some(now_next)) = (was.next_btn(), now.next_btn()) {
+                    assert_eq!(was.remap_persistent(now, true, was_next), Some(now_next), "Next keeps its meaning across marker edges");
+                    assert!(!standin_left_the_ring(was, now, true, was_next));
+                }
             }
-            assert_eq!(was.remap_more(up, false, was.more_btn()), None, "another focus group is untouched");
-            assert_eq!(was.remap_more(up, true, was.primary_btn()), None, "the primary is not More");
+            assert_eq!(was.remap_persistent(up, false, was.more_btn()), None, "another focus group is untouched");
         }
+        assert!(standin_left_the_ring(queued, discs, true, queued.next_btn().unwrap()), "a removed successor cannot activate a track disc");
+    }
+
+    #[test]
+    fn queued_next_is_the_last_control_and_keeps_its_geometry_across_markers() {
+        use plx_platform::i18n::{language_on_this_thread_for_test, SHIPPED};
+        use plx_machine::machine::Measure;
+        let row = TransportRow::new();
+        let measure = plx_base::fontcov::advances::ShippedMeasure;
+        for language in SHIPPED {
+            let _guard = language_on_this_thread_for_test(language);
+            let slots = [
+                slot_for(None, true, NextEpisodeMode::AfterCredits),
+                slot_for(Some(marker(MarkerKind::Intro, false)), true, NextEpisodeMode::AfterCredits),
+                slot_for(Some(marker(MarkerKind::Credits, false)), true, NextEpisodeMode::AfterCredits),
+                slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
+            ];
+            let next = slots[0].item_rect(&row, slots[0].next_btn().unwrap(), &measure).unwrap();
+            assert_eq!(next.x + next.w, CTRL_RIGHT, "{}: Next ends the row", language.tag());
+            assert!(next.w >= measure.width_str(plx_platform::i18n::msg::widgets_next_episode(), theme::size::BODY, true) + 68.0);
+            for slot in slots {
+                let more = slot.item_rect(&row, slot.more_btn(), &measure).unwrap();
+                assert_eq!(more.x + more.w + BTN_GAP, next.x, "More immediately precedes Next");
+                let actual_next = slot.item_rect(&row, slot.next_btn().unwrap(), &measure).unwrap();
+                assert_rect(actual_next, next.x, next.y, next.w, next.h);
+                for idx in 0..slot.more_btn() {
+                    let prior = slot.item_rect(&row, idx, &measure).unwrap();
+                    assert!(prior.x > 0.0 && prior.x + prior.w + BTN_GAP <= more.x, "{}: controls do not overlap More", language.tag());
+                }
+            }
+        }
+        assert_eq!(ControlSlot::Discs.next_width(&row, &measure), 0.0, "no successor reserves no extra space");
     }
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 0.01

@@ -926,7 +926,8 @@ to run out**. Every other clip in both packs is sized so it *cannot* hit EOF ins
 (`make_fixtures.py` trap 9's second half), because a finish tears the session down under assertions
 that were only ever about playing — so those two share a 20 s fixture, `pipe_h264_ac3_short.mkv`,
 which only a case declaring `reaches_eos` may name. The `finished` assertion wants two lines **in order**: `EOS reached: … → ended` (the pump
-gates that on `eos_pushed && pos >= dur - 1s`, so a truncated transfer does not reach it) and then
+requires true EOF and lets the remaining final-second presentation tail play out, with a bounded
+fallback for native clocks that stop just short of duration; pause/seek/holds reset that wait) and then
 `stop_bufferfeed: torn down`. The order is the assertion — every stop tears the engine down, the
 harness's own close included.
 

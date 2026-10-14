@@ -1611,8 +1611,14 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             let offer = fr.ctrl.offer();
             let fresh = offer.is_some() && offer != player.hud.last_offer;
             let previous_btn = player.hud.nav.btn;
-            if let Some(btn) = player.slot.remap_more(fr.ctrl, player.hud.nav.focus == 1, previous_btn) {
+            if let Some(btn) = player.slot.remap_persistent(fr.ctrl, player.hud.nav.focus == 1, previous_btn) {
                 player.hud.nav.btn = btn;
+            }
+            if plx_appkit::player_hud::standin_left_the_ring(player.slot, fr.ctrl, player.hud.nav.focus == 1, previous_btn) {
+                // A vanished control cannot hand an in-flight press to a new occupant.
+                player.hud.nav = HudNav::HOME;
+                app.input.press.cancel();
+                app.ok_armed = false;
             }
             if offer.is_some() {
                 player.hud.last_offer = offer;
@@ -1629,19 +1635,6 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 // the tile behind a transport nobody drew. `HudState::raise_for_offer` is where
                 // that rule, its resting-position clause and the bug are written down.
                 player.hud.raise_for_offer(fr.now, fr.ctrl.primary_btn());
-            } else if plx_appkit::player_hud::standin_left_the_ring(
-                player.slot,
-                fr.ctrl,
-                player.hud.nav.focus == 1,
-                previous_btn,
-            ) {
-                // The stand-in went away under the focus ring. Without this the row swaps back
-                // to the discs with focus still on it and `btn` still 0, so the next OK opened
-                // the SUBTITLES menu instead of toggling pause — exactly the bug class HudNav's
-                // own doc says it exists to kill. Strictly the EDGE: as a steady state it also
-                // fired on a user who walked UP to the discs on purpose, yanking the ring back
-                // the same frame and making OK on a disc unreachable by remote.
-                player.hud.nav = HudNav::HOME;
             }
             player.hud.was_standin = !fr.ctrl.is_discs();
             player.publish();
@@ -4334,6 +4327,73 @@ mod lifecycle_regression_tests {
         step(&mut rig.app, &mut t, vec![]);
         step(&mut rig.app, &mut t, vec![]);
         t
+    }
+
+    /// A deferred More press must keep its action when its old index becomes Next Episode.
+    #[test]
+    fn a_more_press_keeps_its_identity_when_an_intro_appears_before_commit() {
+        let _serial = plx_base::testlock::serial();
+        let Some(mut rig) = Rig::new() else {
+            eprintln!("SKIPPED a_more_press_keeps_its_identity_when_an_intro_appears_before_commit: \
+                lifecycle fixture worker thread could not be spawned");
+            return;
+        };
+        let _mode = NextEpisodeGuard::set(plx_media::route::NextEpisodeMode::AfterCredits);
+        let now = playing_inside_final_credits(&mut rig);
+        let player = super::super::bridge::player_mut(&mut rig.app.pages).unwrap();
+        let old_more = player.slot.more_btn();
+        player.hud.nav.focus = 1;
+        player.hud.nav.btn = old_more;
+        // Both Magic Remote clicks and OK arm this same keyless control-face press.
+        rig.app.input.press.begin_ctl(now);
+        rig.app.ok_armed = true;
+        rig.app.input.press.release(now + 100);
+        rig.app.input.press.tick(now + 100, 0.016);
+        plx_data::metadata::set_playing_markers_for_test(rig.app.bridge.metadata_mut().state_mut(), vec![
+            plx_data::metadata::Marker { kind: plx_data::metadata::MarkerKind::Intro,
+                start_ms: 0, end_ms: 60_000, final_seg: false },
+        ]);
+        let mut fr = Frame::begin(&rig.app.player.session, rig.app.bridge.metadata_view());
+        fr.now = now + 220;
+        fr.dt = 0.016;
+        assert_eq!(fr.ctrl.next_btn(), Some(old_more), "the old numeric seat now names Next");
+        // The shared step helper omits land_results, which owns deferred press commits.
+        // Run the production remap → commit → mount phases explicitly on the due frame.
+        unsafe {
+            playback_tick(&mut rig.app, &mut fr);
+            land_results(&mut rig.app, &mut fr);
+        }
+        assert!(!rig.app.ok_armed, "land_results must consume the due control press");
+        frame(&mut rig.app, fr.now);
+        assert!(matches!(super::super::bridge::player_overlay_kind(&rig.app.pages),
+            Some(plx_screens::player::overlay::OverlayKind::More { quality: false })));
+        assert!(!plx_media::route::play_pending(), "More must never become a successor request");
+        assert_eq!(plx_media::route::up_next(&rig.app.player.session).unwrap().rk, "2");
+    }
+
+    /// The permanent button stays actionable when a credits marker gives way to an outro scene.
+    #[test]
+    fn manual_next_requests_the_successor_during_an_outro_scene() {
+        let _serial = plx_base::testlock::serial();
+        let Some(mut rig) = Rig::new() else {
+            eprintln!("SKIPPED manual_next_requests_the_successor_during_an_outro_scene: \
+                lifecycle fixture worker thread could not be spawned");
+            return;
+        };
+        let _mode = NextEpisodeGuard::set(plx_media::route::NextEpisodeMode::AfterCredits);
+        let now = playing_inside_final_credits(&mut rig);
+        plx_data::metadata::set_playing_markers_for_test(rig.app.bridge.metadata_mut().state_mut(), vec![]);
+        let ctrl = Frame::begin(&rig.app.player.session, rig.app.bridge.metadata_view()).ctrl;
+        let player = super::super::bridge::player_mut(&mut rig.app.pages).unwrap();
+        player.hud.nav.focus = 1;
+        player.hud.nav.btn = ctrl.next_btn().expect("Next remains when the credits marker ends");
+        assert!(!player.up_next.armed(), "the manual button must not arm a countdown");
+        unsafe {
+            activate_player_row(&mut rig.app.player.session, &mut rig.app.adapters.player, ctrl, now,
+                &mut rig.app.refresh_hubs_at, &mut rig.app.pages, &mut rig.app.bridge);
+        }
+        assert!(plx_media::route::play_pending(), "the visible Next button starts the queued episode");
+        assert!(plx_media::route::up_next(&rig.app.player.session).is_none(), "the successor was consumed exactly once");
     }
 
     /// **Next episode: After credits.** The credits of an episode with a successor queued arm no

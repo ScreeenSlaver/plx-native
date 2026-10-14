@@ -106,11 +106,8 @@ pub(crate) fn is_started() -> bool {
 
 /// Perform what the `…` popover reported. Shared by the OK key and the pointer click, so
 /// the two paths can never come to disagree about what a row does.
-pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: &mut plx_media::player::adapter::PlayerAdapter, bridge: &mut super::bridge::Bridge, pages: &mut plx_ui::dispatch::Dispatcher<super::bridge::AppHost>, a: plx_appkit::more_menu::Action) {
+pub(crate) fn apply_more_action(ps: &mut plx_media::route::PlaybackSession, pa: &mut plx_media::player::adapter::PlayerAdapter, bridge: &mut super::bridge::Bridge, a: plx_appkit::more_menu::Action) {
     match a {
-        plx_appkit::more_menu::Action::NextEpisode => {
-            let _ = play_up_next(ps, pa, HUD_LINGER_MS, pages, bridge);
-        }
         plx_appkit::more_menu::Action::ToggleStats => crate::app::diagnostics::toggle(),
         // A rung of the playback-quality ladder — a routing POLICY, not a number handed to a
         // running stream. Not deferred either: `route::set_quality` re-asks the routing question
@@ -602,7 +599,7 @@ pub(crate) fn player_requests(
             // …and its twin, which does NOT resume: the scrub bar is how a paused film is moved.
             // `repause_at` is an `App` field, which is exactly why this is a request.
             PlayerReq::CommitSeek(ns) => commit_seek(ns, repause_at),
-            PlayerReq::More(action) => apply_more_action(ps, pa, bridge, pages, action),
+            PlayerReq::More(action) => apply_more_action(ps, pa, bridge, action),
             PlayerReq::CommitTrack(commit) => commit_track(ps, commit),
             PlayerReq::ArmInfoPress => {
                 press.begin_ctl(now);
@@ -773,7 +770,7 @@ pub(crate) fn activate_ctrl_row(
                 false
             }
         }
-        ControlSlot::Skip(pr) => {
+        ControlSlot::Skip(pr) | ControlSlot::SkipWithNext(pr) => {
             let feature = match pr.kind {
                 plx_data::metadata::MarkerKind::Intro => Some(plx_telemetry::diag::schema::Feature::SkipIntro),
                 // Community recap skips add no new analytics category.
@@ -800,7 +797,7 @@ pub(crate) fn activate_ctrl_row(
                 }
             }
         }
-        ControlSlot::Discs => false,
+        ControlSlot::Discs | ControlSlot::DiscsWithNext => false,
     }
 }
 
@@ -1027,7 +1024,9 @@ pub(crate) unsafe fn activate_player_row(
     // The cursor is the instance's; read the one field this dispatch turns on, so the container
     // is borrowed once and the arms below are free to present a panel on it.
     let btn = super::bridge::player(pages).map_or(0, |player| player.hud.nav.btn);
-    if ctrl.is_more(btn) {
+    if ctrl.is_next(btn) {
+        let _ = play_up_next(ps, pa, HUD_LINGER_MS, pages, bridge);
+    } else if ctrl.is_more(btn) {
         super::bridge::open_player_overlay(ps, bridge.metadata_view(), pages, plx_screens::player::overlay::OverlayKind::More { quality: false });
     } else if !ctrl.is_discs() {
         // A stand-in owns row 1 — activate it. Same value the draw used. (Its `true` answer used
