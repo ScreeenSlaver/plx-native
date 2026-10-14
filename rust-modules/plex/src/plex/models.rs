@@ -4,6 +4,20 @@
 //! These are read-only: the app's own view structs are populated *from* them.
 use serde::Deserialize;
 
+#[derive(Deserialize, Default)]
+pub struct ExternalGuid {
+    #[serde(default, deserialize_with = "de_str")]
+    pub id: String,
+}
+
+fn de_external_guids<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ExternalGuid>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(value.as_array().into_iter().flatten().filter_map(|row| {
+        row.get("id").and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty()).map(|id| ExternalGuid { id: id.to_owned() })
+    }).collect())
+}
+
 /// `{ "MediaContainer": … }` — every list/detail response.
 #[derive(Deserialize, Default)]
 pub struct Envelope {
@@ -311,6 +325,14 @@ pub struct Metadata {
     /// Plex's own client matches these two, which is the behaviour "Also available" reproduces.
     #[serde(default, deserialize_with = "de_str")]
     pub guid: String,
+    /// Matched external provider identities (for example `tmdb://1396`). The scalar `guid`
+    /// above is Plex's own identity and must never be treated as an IMDb/TMDB identifier.
+    #[serde(rename = "Guid", default, deserialize_with = "de_external_guids")]
+    pub external_guids: Vec<ExternalGuid>,
+    /// Episode numbering source on a show: empty inherits the library; `episodeSort` is only
+    /// presentation order and must never be used as evidence about season/episode numbering.
+    #[serde(rename = "showOrdering", default, deserialize_with = "de_str")]
+    pub show_ordering: String,
     #[serde(default)]
     pub title: String,
     /// The LIBRARY this row lives in, on the server that answered ("Movies", "Film Club"). Sent on

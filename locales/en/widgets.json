@@ -163,6 +163,10 @@
     "value": "Skip Intro",
     "description": "Player action that skips the currently offered introduction or credits marker."
   },
+  "widgets.skip.recap": {
+    "value": "Skip Recap",
+    "description": "Player action that seeks past the recap segment of the currently playing episode."
+  },
   "widgets.skip.credits": {
     "value": "Skip Credits",
     "description": "Player action that skips the currently offered introduction or credits marker."

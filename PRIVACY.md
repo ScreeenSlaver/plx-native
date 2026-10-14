@@ -21,6 +21,24 @@ To browse and play media, update watch progress and use server features, PlxNati
 directly with the Plex Media Servers you select. Those requests are handled by the selected server
 and its operator. PlxNative’s developer does not receive them.
 
+## Community skip-segment lookups
+
+While an item is playing, PlxNative may make a read-only HTTPS lookup for community-submitted intro,
+recap and credits timings. The fixed services are TheIntroDB (`api.theintrodb.org`) and, when the
+first service leaves a timing kind unanswered, IntroDB (`api.introdb.app`). A lookup is made only
+when Plex metadata supplies a supported external movie/show ID and, for an episode, a valid season
+and episode number. TheIntroDB also receives the media duration in milliseconds to help match the
+right timing. The fallback receives an IMDb ID and episode coordinates (or a movie flag).
+
+These public requests reveal the TV's network address, including its public IP address, to the
+service and the network carrying the request. They contain only the supported external ID,
+episode coordinates when applicable, and duration for TheIntroDB. They do not contain Plex account
+or server credentials, Plex titles, server addresses, file paths, Plex item IDs, or media bytes.
+PlxNative does not upload media or timing submissions. The public identifiers reveal which title
+is being looked up. The lookup runs in the
+background and playback does not wait for it. Existing Plex marker timings take precedence; public
+community data fills only missing kinds, and coverage varies by title, edition and episode ordering.
+
 ## Data stored on this television
 
 PlxNative has a developer-only input/frame recorder used to reproduce and test bugs. It is not

@@ -219,18 +219,18 @@ pub struct Layout {
 /// are one arrangement and the arrangement is host-testable. Measuring is the impure half and lives
 /// in [`layout`]: `text_width` is `TTF_SizeUTF8`, which the host suite cannot even link against.
 pub fn layout_of(next_w: f32, credits_w: f32) -> Layout {
-    use crate::player_hud::{CTRL_H, CTRL_RIGHT, CTRL_Y};
-    let next = Rect::new(CTRL_RIGHT - next_w, CTRL_Y, next_w, CTRL_H);
+    use crate::player_hud::{CTRL_H, STANDIN_RIGHT, CTRL_Y};
+    let next = Rect::new(STANDIN_RIGHT - next_w, CTRL_Y, next_w, CTRL_H);
     let credits = Rect::new(next.x - PILL_GAP - credits_w, next.y, credits_w, next.h);
     let caption = Rect::new(
-        CTRL_RIGHT - CAPTION_W,
+        STANDIN_RIGHT - CAPTION_W,
         CTRL_Y - BTN_GAP - CAPTION_H,
         CAPTION_W,
         CAPTION_H,
     );
     let still_h = (next_w * 9.0 / 16.0).round();
     let still = Rect::new(
-        CTRL_RIGHT - next_w,
+        STANDIN_RIGHT - next_w,
         caption.y - CAP_GAP - still_h,
         next_w,
         still_h,
@@ -375,7 +375,11 @@ mod tests {
             !countdown_may_run(true, true, BTN_CREDITS),
             "reaching for Watch Credits is reaching for the alternative"
         );
-        for b in [BTN_CREDITS, BTN_NEXT] {
+        assert!(
+            !countdown_may_run(true, true, crate::player_hud::BTN_MORE),
+            "reaching for More cancels automatic advance"
+        );
+        for b in [BTN_CREDITS, BTN_NEXT, crate::player_hud::BTN_MORE] {
             assert!(
                 !countdown_may_run(true, false, b),
                 "focus off the row is the user driving the transport, whatever btn still says"
@@ -389,7 +393,7 @@ mod tests {
     /// a countdown nobody can see. Every combination is refused while a panel is up.
     #[test]
     fn an_open_panel_refuses_the_countdown_however_the_ring_rests_under_it() {
-        for b in [BTN_CREDITS, BTN_NEXT] {
+        for b in [BTN_CREDITS, BTN_NEXT, crate::player_hud::BTN_MORE] {
             for focused in [false, true] {
                 assert!(
                     !countdown_may_run(false, focused, b),
@@ -416,11 +420,10 @@ mod tests {
     /// the host suite cannot link SDL2_ttf at all.
     #[test]
     fn the_column_is_right_anchored_on_one_edge() {
-        // the real orders of magnitude: `ctrl_slot`'s floor is 236, and "Watch Credits" measures a
-        // little under it — which is the asymmetry the design is making a point of
+        // Representative measured labels, wider than the replaced pair's minimum span.
         let l = layout_of(243.0, 226.0);
         let (n, c, t, cap) = (l.next, l.credits, l.still, l.caption);
-        let right = crate::player_hud::CTRL_RIGHT;
+        let right = crate::player_hud::STANDIN_RIGHT;
         assert_eq!(n.x + n.w, right, "the primary holds the row's right edge");
         assert_eq!(t.x + t.w, right, "…and the still shares it");
         assert_eq!(

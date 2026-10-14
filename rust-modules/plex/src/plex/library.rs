@@ -11,6 +11,14 @@ fn sidecar_key_allowed(key: &str) -> bool {
         && ext.len() <= 10 && ext.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
+fn resolved_segment_ordering(show: &Metadata, library: &[super::models::Setting]) -> Option<String> {
+    let explicit = if !show.show_ordering.trim().is_empty() { show.show_ordering.trim() }
+        else { show.preferences.setting.iter().find(|s| s.id == "showOrdering").map_or("", |s| s.value.trim()) };
+    if !explicit.is_empty() { return Some(explicit.to_owned()); }
+    library.iter().find(|s| s.id == "showOrdering")
+        .map(|s| s.value.trim()).filter(|value| !value.is_empty()).map(str::to_owned)
+}
+
 impl Client {
     /// GET /library/sections (D-3: spec-canonical is /library/sections/all; keep the
     /// known-working bare path). Read `.directory[]` for {kind, key}.
@@ -173,9 +181,36 @@ impl Client {
         let path = QueryBuilder::new(format!("/library/metadata/{rating_key}"))
             .int("includeChapters", 1)
             .int("includeMarkers", 1)
+            .int("includeGuids", 1)
             .int("includeOnDeck", 1)
             .build();
         self.get_json(&path)?.metadata.into_iter().next()
+    }
+
+    /// Optional community-segment identity lookup, off the playback path. Leaf and parent reads
+    /// share their caller's small deadline; this must not consume the ordinary bulk-read budget.
+    pub fn segment_metadata(&self, rating_key: &str, deadline: std::time::Instant) -> Option<Metadata> {
+        if rating_key.is_empty() || !rating_key.bytes().all(|b| b.is_ascii_digit()) { return None; }
+        let path = QueryBuilder::new(format!("/library/metadata/{rating_key}"))
+            .int("includeGuids", 1).int("includePreferences", 1).build();
+        match self.get_json_with_headers_until(&path, &[], deadline) {
+            super::client::JsonDeadlineOutcome::Response { parsed, .. } => parsed?.metadata.into_iter().next(),
+            _ => None,
+        }
+    }
+
+    /// Read a show's numbering source, including its inherited library preference. A shared
+    /// server may refuse the latter GET; absence is UNKNOWN, never an assumed TMDB default.
+    /// Plex documents the modern agent's default as TMDB aired, but the owner can change it.
+    pub fn segment_show_ordering(&self, show: &Metadata, deadline: std::time::Instant) -> Option<String> {
+        if let Some(explicit) = resolved_segment_ordering(show, &[]) { return Some(explicit); }
+        if show.library_section_id <= 0 { return None; }
+        let path = format!("/library/sections/{}/prefs", show.library_section_id);
+        let container = match self.get_json_with_headers_until(&path, &[], deadline) {
+            super::client::JsonDeadlineOutcome::Response { parsed, .. } => parsed?,
+            _ => return None,
+        };
+        resolved_segment_ordering(show, &container.setting)
     }
 
     /// GET /library/metadata/{rating_key}/extras → clip rows (`subtype` trailer / behindTheScenes / …).
@@ -362,6 +397,19 @@ fn guid_type(guid: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn community_ordering_resolves_real_library_defaults_without_overriding_show_numbering() {
+        let library: MediaContainer = serde_json::from_str(r#"{"Setting":[{"id":"showOrdering","default":"tmdbAiring","value":"tmdbAiring"}]}"#).unwrap();
+        let inherited: Metadata = serde_json::from_str(r#"{"type":"show","Preferences":{"Setting":[{"id":"showOrdering","value":""}]}}"#).unwrap();
+        assert_eq!(resolved_segment_ordering(&inherited, &library.setting).as_deref(), Some("tmdbAiring"));
+        assert!(resolved_segment_ordering(&inherited, &[]).is_none(), "missing or refused library prefs are not evidence of a default");
+        for ordering in ["dvd", "absolute", "aired", "tmdbAiring"] {
+            let overridden: Metadata = serde_json::from_value(serde_json::json!({"type":"show", "showOrdering":ordering})).unwrap();
+            assert_eq!(resolved_segment_ordering(&overridden, &library.setting).as_deref(), Some(ordering));
+            let preferred: Metadata = serde_json::from_value(serde_json::json!({"type":"show", "Preferences":{"Setting":[{"id":"showOrdering","value":ordering}]}})).unwrap();
+            assert_eq!(resolved_segment_ordering(&preferred, &library.setting).as_deref(), Some(ordering));
+        }
+    }
     use super::*;
 
     #[cfg(feature = "devtriggers")]

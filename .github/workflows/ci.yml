@@ -358,17 +358,18 @@ jobs:
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('ci/build-ffmpeg.sh', 'ci/arm-cc.py', 'ci/check-link-evidence.py', 'ci/stage-link-evidence.py', '.github/actions/webos-ndk/action.yml') }}
 
       - name: Build
-        run: make WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}' -j"$(nproc)"
+        # Keep the feature set identical to a shipped package. `FLAVOR=debug` below controls only
+        # the app identity, so the artifact installs beside stable without carrying dev triggers.
+        run: make RELEASE=1 WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}' -j"$(nproc)"
 
       - name: Package
-        # DELIBERATELY the developer id. This artifact is a DEV build — the whole point of a PR
-        # package is that you can sideload it with the `/tmp` trigger surface on — and
-        # `release-guard` refuses a dev build on the id users install, correctly. So the artifact
-        # below is `com.beb.plxnative.debug_*.ipk` and installs BESIDE anyone's real one rather
-        # than over it. The release job is the only place `FLAVOR=stable` belongs (release.yml).
-        # Named explicitly rather than inherited, so this is a decision on the page instead of a
-        # default that moves if the Makefile's does.
-        run: make ipk FLAVOR=debug WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}'
+        # The debug flavour gets a separate app id, tile, sign-in and storage. RELEASE=1 strips the
+        # developer-only feature set from the binary; keeping it explicit on both invocations
+        # prevents the package step from rebuilding the staged binary with default features.
+        run: make RELEASE=1 ipk FLAVOR=debug WEBOS_SDK='${{ steps.ndk.outputs.sdk-dir }}'
+
+      - name: Assert the package uses shipping features
+        run: grep -q '^features:--no-default-features' pkg/.build-config
 
       - name: Binary size budget
         # The STRIPPED binary `make ipk` just staged (the one inside the .ipk), not the unstripped

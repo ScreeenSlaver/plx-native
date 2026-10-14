@@ -6,6 +6,7 @@
 use std::os::raw::c_int;
 pub mod record;
 pub mod sub_layout;
+mod skip_provider;
 pub mod track_label;
 pub mod track_names;
 use std::panic::catch_unwind;
@@ -75,7 +76,7 @@ impl<'a> MetadataView<'a> {
         (!self.state.skipped.contains(&(m.kind, m.start_ms))).then_some(m)
     }
     pub fn synthesized_tail_marker(&self, head: Playhead, has_next: bool) -> Option<Marker> {
-        if !has_next || !head.playing {
+        if !has_next || !head.playing || self.state.provider_no_credits {
             return None;
         }
         if self.playing_markers().iter().any(|m| m.kind == MarkerKind::Credits) {
@@ -119,6 +120,9 @@ pub struct MetadataState {
     /// Segments the user has already skipped in THIS playback — see the retired `SKIPPED` static's
     /// doc.
     skipped: Vec<(MarkerKind, i64)>,
+    /// A provider explicitly reported no credits for this playback; a guessed tail must not
+    /// contradict that answer. Cleared with the playing leaf.
+    provider_no_credits: bool,
     /// The item a playback was installed for since the loaded page was read. The page's stream list
     /// (and the selection flags on it) describes the server BEFORE that playback, which can move
     /// both — a subtitle downloaded mid-playback is installed and selected on the part — so
@@ -132,6 +136,7 @@ pub struct MetadataState {
 /// landing. A worker captures a clone of the owning `Bridge`'s `Arc<MetadataAdapter>` before it
 /// spawns; the adapter is never rotated (D3), so an old worker can always land into it.
 pub struct MetadataAdapter {
+    skip_provider: skip_provider::Worker,
     detail_gen: std::sync::atomic::AtomicU32,
     detail_done: std::sync::atomic::AtomicU32,
     detail_landing: plx_machine::landing::Landing<DetailKey, Option<Detail>>,
@@ -153,6 +158,7 @@ pub struct MetadataAdapter {
 impl Default for MetadataAdapter {
     fn default() -> Self {
         Self {
+            skip_provider: skip_provider::Worker::default(),
             detail_gen: std::sync::atomic::AtomicU32::new(0),
             detail_done: std::sync::atomic::AtomicU32::new(0),
             detail_landing: plx_machine::landing::Landing::with_inflight(2, 4),
@@ -1149,17 +1155,18 @@ fn convert_chapters(chapters: &[plx_plex::plex::Chapter]) -> Vec<Chapter> {
         .collect()
 }
 
-/// Which timeline segment a [`Marker`] describes. Only the two the player acts on are modelled —
+/// Which timeline segment a [`Marker`] describes. Only the kinds the player acts on are modelled —
 /// PMS also emits `commercial` on recorded content, which [`convert_markers`] drops, so an
 /// unhandled kind can never be mistaken for one of these.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum MarkerKind {
     Intro,
+    Recap,
     Credits,
 }
 
-/// A server-detected intro / credits segment of the playing item (`?includeMarkers=1`). Drives
+/// A server- or community-detected intro / recap / credits segment of the playing item. Drives
 /// the in-player Skip prompt and — for an episode with something queued after it — the moment the
 /// Up Next control takes over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1188,6 +1195,7 @@ fn convert_markers(markers: &[plx_plex::plex::Marker], duration_ms: i64) -> Vec<
         .filter_map(|m| {
             let kind = match m.kind.as_str() {
                 "intro" => MarkerKind::Intro,
+                "recap" => MarkerKind::Recap,
                 "credits" => MarkerKind::Credits,
                 _ => return None,
             };
@@ -1851,6 +1859,7 @@ fn reset(state: &mut MetadataState, adapter: &MetadataAdapter) {
     state.playing = None;
     state.played_since_load = None;
     state.skipped.clear();
+    state.provider_no_credits = false;
     alt_clear(state);
 }
 
@@ -2543,6 +2552,7 @@ fn retire_playing(state: &mut MetadataState) {
 fn retire_playing_item(state: &mut MetadataState) {
     state.playing = None;
     state.skipped.clear();
+    state.provider_no_credits = false;
 }
 
 /// MAIN THREAD: add one subtitle the server just installed to the playing item. Only for the same
@@ -2573,6 +2583,7 @@ fn append_playing_sub(state: &mut MetadataState, sid: plx_plex::plex::ServerId, 
 /// MAIN THREAD: install a fetched playing-item store.
 fn install_playing(state: &mut MetadataState, pt: Option<PlayingItem>) {
     state.skipped.clear(); // a different leaf's markers, so a fresh slate
+    state.provider_no_credits = false;
     if let Some(pt) = &pt {
         state.played_since_load = Some((pt.sid, pt.rk.clone()));
         plx_base::eventlog::log(&format!(
@@ -3606,6 +3617,7 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
         MetadataCmd::SetWatchedLocal { sid, rk, on } => set_watched_local(state, sid, &rk, on),
         MetadataCmd::InstallPlaying(p) => {
             install_playing(state, p);
+            adapter.skip_provider.start(state.playing.as_ref(), state.now.as_ref().map_or(0, |n| n.dur_ms));
             true
         }
         MetadataCmd::AppendPlayingSub { sid, rk, stream } => append_playing_sub(state, sid, &rk, stream),
@@ -3614,10 +3626,12 @@ pub fn run(state: &mut MetadataState, adapter: &std::sync::Arc<MetadataAdapter>,
             true
         }
         MetadataCmd::RetirePlaying => {
+            adapter.skip_provider.cancel();
             retire_playing(state);
             true
         }
         MetadataCmd::RetirePlayingItem => {
+            adapter.skip_provider.cancel();
             retire_playing_item(state);
             true
         }
@@ -3668,7 +3682,26 @@ pub fn pump_detail_with_gate(state: &mut MetadataState, adapter: &std::sync::Arc
         };
         fresh |= install_landed_detail(state, adapter, d);
     }
-    fresh
+    fresh | pump_skip_provider(state, adapter, gate)
+}
+
+/// Provider answers are optional, item-addressed data. Drain on the same metadata landing gate
+/// as detail, including while Player is mounted; never wait for a provider during playback start.
+fn pump_skip_provider(state: &mut MetadataState, adapter: &MetadataAdapter,
+    gate: &plx_machine::landgate::Gate) -> bool {
+    let answer = crate::stores::take_landing(gate, crate::stores::StoreId::Metadata, || {
+        adapter.skip_provider.take()
+    });
+    let Some(answer) = answer else { return false };
+    let Some(playing) = state.playing.as_mut() else { return false };
+    if !answer.matches(playing) { return false; }
+    let changed = state.provider_no_credits != answer.no_credits();
+    state.provider_no_credits = answer.no_credits();
+    changed | answer.merge_into(&mut playing.markers)
+}
+
+pub(crate) fn cancel_skip_enrichment(adapter: &MetadataAdapter) {
+    adapter.skip_provider.cancel();
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -4504,9 +4537,10 @@ mod marker_tests {
         assert_eq!(m[1].kind, MarkerKind::Intro);
         assert!(!m[1].final_seg);
         // `commercial` (PMS emits it on recorded content) has no behaviour — it must be DROPPED,
-        // not defaulted into one of the two, or the pill would offer to skip an ad break as an intro.
+        // not defaulted into a handled kind, or the pill would offer to skip an ad break as an intro.
         assert!(convert_markers(&[wire("commercial", 10, 20, false)], 0).is_empty());
         assert!(convert_markers(&[wire("", 10, 20, false)], 0).is_empty());
+        assert_eq!(convert_markers(&[wire("recap", 0, 10_000, false)], 0)[0].kind, MarkerKind::Recap);
     }
 
     #[test]

@@ -1,7 +1,6 @@
-//! The **Skip Intro / Skip Credits** control. While the playhead sits inside one of the playing
-//! leaf's server markers (`metadata::playing_markers`, fetched with `?includeMarkers=1`) this
-//! button TAKES THE PLACE of the transport's Subtitles/Audio discs — same row, same right edge,
-//! same height — and the discs return the moment the segment ends.
+//! The **Skip Intro / Skip Recap / Skip Credits** control. While the playhead sits inside one of
+//! the playing leaf's markers this button replaces the Subtitles/Audio discs. More remains beside
+//! it, so quality and next-episode controls remain reachable throughout the segment.
 //!
 //! Replacing them rather than joining them is the design call: one wide unmissable target in the
 //! spot the eye already goes for transport controls. The cost is that CC/Audio are unreachable for
@@ -44,6 +43,7 @@ impl Prompt {
     pub fn label(&self) -> &'static str {
         match self.kind {
             MarkerKind::Intro => plx_platform::i18n::msg::widgets_skip_intro(),
+            MarkerKind::Recap => plx_platform::i18n::msg::widgets_skip_recap(),
             MarkerKind::Credits => plx_platform::i18n::msg::widgets_skip_credits(),
         }
     }

@@ -37,6 +37,7 @@
   "widgets.playback.converting_codec": "Convirtiendo · {codec}",
   "widgets.chapters.number": "Capítulo {number}",
   "widgets.skip.intro": "Saltar introducción",
+  "widgets.skip.recap": "Saltar resumen",
   "widgets.skip.credits": "Saltar créditos",
   "widgets.next.episode": "Siguiente episodio",
   "widgets.next.credits": "Ver créditos",

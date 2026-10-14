@@ -612,11 +612,15 @@ impl TransportRow {
 /// its OK and its click, and a second literal `2` over there is exactly the drift `ControlSlot`
 /// was introduced to stop.
 pub const BTN_MORE: i32 = BTN_N - 1;
-/// width the disc row occupies, the floor for anything replacing it
+/// Skip/Up Next end before the persistent More disc, with the same gap as the ordinary row.
+pub const STANDIN_RIGHT: f32 = CTRL_RIGHT - BTN_S - BTN_GAP;
+/// Width the complete disc row occupies.
 pub const CTRL_ROW_W: f32 = 3.0 * BTN_S + 2.0 * BTN_GAP;
+/// The Subtitles/Audio pair's span; More remains beside its replacement.
+const STANDIN_MIN_W: f32 = 2.0 * BTN_S + BTN_GAP;
 
 /// The shared control-row slot for anything that STANDS IN for the disc pair: right-aligned to the
-/// discs' own edge, and never narrower than the pair it replaces so the row does not visibly shrink
+/// pair's own edge, and never narrower than the pair it replaces so the row does not visibly shrink
 /// when it appears. ONE geometry for both stand-ins and for the pointer hit-test.
 ///
 /// The measured width is memoised per label, avoiding repeated capability calls and string
@@ -628,13 +632,13 @@ pub fn ctrl_slot(row: &mut TransportRow, label: &str, measure: &dyn plx_machine:
         None => {
             let measured = ctrl_slot_measure(label, measure);
             // `text_width` reads 0 until `init_text` has run — don't cache a pre-init measurement
-            if measured > CTRL_ROW_W {
+            if measured > STANDIN_MIN_W {
                 memo.push((label.to_string(), measured));
             }
             measured
         }
     };
-    Rect::new(CTRL_RIGHT - w, CTRL_Y, w, CTRL_H)
+    Rect::new(STANDIN_RIGHT - w, CTRL_Y, w, CTRL_H)
 }
 
 /// [`ctrl_slot`]'s width without writing the memo — the cached width when the draw has measured
@@ -645,7 +649,7 @@ pub fn ctrl_slot_w(row: &TransportRow, label: &str, measure: &dyn plx_machine::m
 
 fn ctrl_slot_measure(label: &str, measure: &dyn plx_machine::machine::Measure) -> f32 {
     const PAD_X: f32 = 34.0;
-    (measure.width_str(label, theme::size::BODY, true) + 2.0 * PAD_X).max(CTRL_ROW_W)
+    (measure.width_str(label, theme::size::BODY, true) + 2.0 * PAD_X).max(STANDIN_MIN_W)
 }
 
 /// What currently occupies the transport's right-hand control row.
@@ -671,13 +675,24 @@ impl ControlSlot {
     pub fn items(self) -> c_int {
         match self {
             ControlSlot::Discs => BTN_N,
-            // Watch Credits + Next Episode — the one stand-in with a pair
-            ControlSlot::UpNext(_) => 2,
-            ControlSlot::Skip(_) => 1,
+            // Watch Credits + Next Episode + More
+            ControlSlot::UpNext(_) => 3,
+            ControlSlot::Skip(_) => 2,
         }
     }
+    /// More keeps a fixed screen position while its row index follows the current occupants.
+    pub fn more_btn(self) -> c_int {
+        self.items() - 1
+    }
+    pub fn is_more(self, idx: c_int) -> bool {
+        idx == self.more_btn()
+    }
+    /// Keep a chosen More control across a row replacement, whose indices may differ.
+    pub fn remap_more(self, now: Self, focused: bool, btn: c_int) -> Option<c_int> {
+        (focused && self.is_more(btn)).then(|| now.more_btn())
+    }
     /// Where the focus ring parks when this row APPEARS. It is 0 everywhere except Up Next, whose
-    /// primary is drawn on the RIGHT — and getting that wrong is not cosmetic: the countdown's
+    /// primary is the right-hand pill — and getting that wrong is not cosmetic: the countdown's
     /// cancel rule is a steady state (`up_next::countdown_may_run`), so parking on item 0 there
     /// would disarm the timer on the frame after it armed.
     pub fn primary_btn(self) -> c_int {
@@ -713,11 +728,14 @@ impl ControlSlot {
         if idx < 0 || idx >= self.items() {
             return None;
         }
+        if self.is_more(idx) {
+            return Some(disc_hit_rect(BTN_MORE));
+        }
         Some(match self {
             ControlSlot::Discs => disc_hit_rect(idx),
             ControlSlot::Skip(pr) => {
                 let w = ctrl_slot_w(row, pr.label(), measure);
-                Rect::new(CTRL_RIGHT - w, CTRL_Y, w, CTRL_H)
+                Rect::new(STANDIN_RIGHT - w, CTRL_Y, w, CTRL_H)
             }
             ControlSlot::UpNext(_) => {
                 let l = crate::up_next::layout_peek(row, measure);
@@ -780,10 +798,8 @@ pub fn slot(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::Me
 }
 
 /// PURE edge: has a stand-in just vanished OUT FROM UNDER the focus ring, so the ring has to go
-/// back to the scrubber? `focused` is whether the control row currently holds focus. `was_standin`
-/// is the occupant on the last OVERLAY-FREE frame, not simply the last frame — the caller only
-/// samples it while the transport is bare, so an edge that happens behind an open track menu / Info
-/// card is held and fires on the frame the overlay closes, rather than being lost.
+/// back to the scrubber? `focused` is whether the control row currently holds focus. More survives
+/// every replacement, so its ring must stay on More rather than return to the scrubber.
 ///
 /// It exists because the row swapping from a Skip pill back to the discs leaves focus on the row
 /// with `btn` still 0, so the next OK opens the SUBTITLES menu instead of toggling pause.
@@ -793,8 +809,8 @@ pub fn slot(ps: &plx_media::route::PlaybackSession, meta: plx_data::metadata::Me
 /// deliberately walked UP to the Subtitles/Audio discs — the ring is then yanked back to the
 /// scrubber the same frame it arrives, so focus can never rest on a disc and OK on one is
 /// unreachable by remote. The pointer path never saw it, which is why the on-device suite did not.
-pub fn standin_left_the_ring(was_standin: bool, now: ControlSlot, focused: bool) -> bool {
-    was_standin && now.is_discs() && focused
+pub fn standin_left_the_ring(was: ControlSlot, now: ControlSlot, focused: bool, btn: c_int) -> bool {
+    !was.is_discs() && now.is_discs() && focused && !was.is_more(btn)
 }
 
 /// The bottom scrim's height — the transport's dark ground, transparent at its top edge and
@@ -1343,19 +1359,18 @@ fn btn_x(idx: i32) -> f32 {
     CTRL_RIGHT - BTN_S - (BTN_N - 1 - idx) as f32 * (BTN_S + BTN_GAP)
 }
 
-/// which control button a pointer at (cx,cy) is over: 0 = Subtitles, 1 = Audio, 2 = More, or None.
-/// The single source of truth for the button rects, shared with draw_hud.
+/// Which visible disc a pointer at (cx,cy) is over, returned at its current row index.
+/// Shares the button rects with draw_hud; stand-in pills are registered separately.
 ///
-/// `slot` is passed in rather than re-derived: while a stand-in owns the row the discs are not on
-/// screen, and a click in that band must not open a track menu the user cannot see.
+/// `slot` is passed in rather than re-derived: a stand-in hides the track discs but retains More.
 pub fn icon_hit(slot: ControlSlot, cx: f32, cy: f32) -> Option<i32> {
-    if !slot.is_discs() || cy < BTN_Y || cy > BTN_Y + BTN_S {
+    if cy < BTN_Y || cy > BTN_Y + BTN_S {
         return None;
     }
-    (0..BTN_N).find(|&idx| {
+    (0..BTN_N).filter(|&idx| slot.is_discs() || idx == BTN_MORE).find(|&idx| {
         let x = btn_x(idx);
         cx >= x && cx <= x + BTN_S
-    })
+    }).map(|idx| if idx == BTN_MORE { slot.more_btn() } else { idx })
 }
 
 // (`scrub_hit` stood here — the scrub band's own `(cx,cy) -> Option<frac>` predicate, `icon_hit`'s
@@ -1861,7 +1876,7 @@ pub fn draw_hud(
                 crate::up_next::draw(ps, row, up, p, focus == 1, btn, now, measure);
             }
             ControlSlot::Skip(pr) => {
-                crate::skip_pill::draw(row, p, pr, focus == 1, measure);
+                crate::skip_pill::draw(row, p, pr, focus == 1 && btn == 0, measure);
             }
             ControlSlot::Discs => {
                 for i in 0..BTN_N {
@@ -1877,6 +1892,14 @@ pub fn draw_hud(
                         .draw(&e, p);
                 }
             }
+        }
+
+        if !slot.is_discs() {
+            TransportButton::new(BTN_MORE, Rect::new(btn_x(BTN_MORE), BTN_Y, BTN_S, BTN_S))
+                .focused(focus == 1 && slot.is_more(btn))
+                .ground(ControlGround::Unkeyed)
+                .scale(row.scale(slot.more_btn()))
+                .draw(&e, p);
         }
 
         draw_playbar(p, Playbar::live(ps, busy, focus, row.since_play_ms(now), now), measure);
@@ -2057,8 +2080,8 @@ mod tests {
 
     /// The row is right-anchored and does not overlap itself: the LAST disc ends exactly at
     /// `CTRL_RIGHT`, each disc sits a full `BTN_GAP` clear of its neighbour, and the whole span is
-    /// `CTRL_ROW_W` — which is the floor `ctrl_slot` gives a stand-in, so a drifting span would
-    /// silently let the Skip pill shrink the row.
+    /// `CTRL_ROW_W`. The pair's stand-in keeps the same left edge at its minimum width while
+    /// leaving More at the right edge.
     #[test]
     fn the_disc_row_is_right_anchored_and_spans_ctrl_row_w() {
         assert_eq!(
@@ -2076,8 +2099,9 @@ mod tests {
         assert_eq!(
             CTRL_RIGHT - btn_x(0),
             CTRL_ROW_W,
-            "drawn span vs the stand-in floor"
+            "drawn span"
         );
+        assert_eq!(STANDIN_RIGHT - STANDIN_MIN_W, btn_x(0), "the stand-in replaces only the pair");
     }
 
     /// A point in the row's band but in a GAP, or past either end, belongs to no disc — the click
@@ -2118,18 +2142,19 @@ mod tests {
         );
     }
 
-    /// While a stand-in owns the row the discs are not on screen, so nothing in that band may
-    /// report a disc — the rule `icon_hit`'s `slot` parameter exists for.
+    /// A stand-in hides the track discs; the persistent More disc remains clickable at its
+    /// current row index, so the pointer and D-pad activate the same action.
     #[test]
-    fn a_stand_in_owning_the_row_hides_every_disc_from_the_hit_test() {
+    fn a_stand_in_hides_the_track_discs_but_keeps_more_clickable() {
         let cy = BTN_Y + BTN_S * 0.5;
-        let slot = slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown);
-        for i in 0..BTN_N {
-            assert_eq!(
-                icon_hit(slot, btn_x(i) + BTN_S * 0.5, cy),
-                None,
-                "disc {i} under a stand-in"
-            );
+        for slot in [
+            slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown),
+            slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown),
+        ] {
+            for i in 0..BTN_MORE {
+                assert_eq!(icon_hit(slot, btn_x(i) + BTN_S * 0.5, cy), None, "hidden track disc {i}");
+            }
+            assert_eq!(icon_hit(slot, btn_x(BTN_MORE) + BTN_S * 0.5, cy), Some(slot.more_btn()));
         }
     }
 
@@ -2155,7 +2180,7 @@ mod tests {
         for has_next in [false, true] {
             let slot = slot_for(Some(marker(MarkerKind::Intro, false)), has_next, NextEpisodeMode::Countdown);
             assert!(matches!(slot, ControlSlot::Skip(p) if p.kind == MarkerKind::Intro));
-            assert_eq!(slot.items(), 1, "a Skip pill is the row's only item");
+            assert_eq!(slot.items(), 2, "Skip + More");
             assert_eq!(
                 slot.primary_btn(),
                 0,
@@ -2166,11 +2191,11 @@ mod tests {
         // credits WITH somewhere to go → Up Next outranks Skip Credits…
         let up = slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown);
         assert!(matches!(up, ControlSlot::UpNext(_)));
-        // …and it is the ONE stand-in with a pair, whose primary is the RIGHT-hand item. Asserted
-        // together because they are one fact: an `items()` of 2 with a `primary_btn()` of 0 would
+        // …and its primary is the RIGHT-hand pill, with More beside it. Asserted
+        // together because they are one fact: a `primary_btn()` of 0 would
         // park the ring on Watch Credits, and `up_next::countdown_may_run` would then disarm the
         // countdown on the frame after it armed — a timer that visibly never runs.
-        assert_eq!(up.items(), 2, "Watch Credits + Next Episode");
+        assert_eq!(up.items(), 3, "Watch Credits + Next Episode + More");
         assert_eq!(up.primary_btn(), crate::up_next::BTN_NEXT);
         // …and WITHOUT (a show's last episode) it stays Skip Credits, which is the whole reason
         // both still exist
@@ -2254,17 +2279,28 @@ mod tests {
         let skip = slot_for(Some(marker(MarkerKind::Intro, false)), false, NextEpisodeMode::Countdown);
 
         // the edge it exists for: the pill was there last frame, the discs are back, ring on the row
-        assert!(standin_left_the_ring(true, discs, true));
+        assert!(standin_left_the_ring(skip, discs, true, skip.primary_btn()));
 
         // the steady state it must NOT fire on: the discs were already there, so nothing vanished
         assert!(
-            !standin_left_the_ring(false, discs, true),
+            !standin_left_the_ring(discs, discs, true, discs.primary_btn()),
             "walking UP to the discs is not a lost stand-in"
         );
 
         // nothing to take back if the ring is elsewhere, or if a stand-in still owns the row
-        assert!(!standin_left_the_ring(true, discs, false));
-        assert!(!standin_left_the_ring(true, skip, true));
+        assert!(!standin_left_the_ring(skip, discs, false, skip.primary_btn()));
+        assert!(!standin_left_the_ring(skip, skip, true, skip.primary_btn()));
+
+        let up = slot_for(Some(marker(MarkerKind::Credits, true)), true, NextEpisodeMode::Countdown);
+        for was in [discs, skip, up] {
+            for now in [discs, skip, up] {
+                let next_btn = was.remap_more(now, true, was.more_btn()).expect("More survives every row");
+                assert!(now.is_more(next_btn), "a fresh offer must retain the chosen More action");
+                assert!(!standin_left_the_ring(was, now, true, was.more_btn()), "vanishing markers keep More focused");
+            }
+            assert_eq!(was.remap_more(up, false, was.more_btn()), None, "another focus group is untouched");
+            assert_eq!(was.remap_more(up, true, was.primary_btn()), None, "the primary is not More");
+        }
     }
     fn close(a: f32, b: f32) -> bool {
         (a - b).abs() < 0.01

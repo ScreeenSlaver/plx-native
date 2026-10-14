@@ -286,6 +286,7 @@ impl MetadataStore {
     /// mirrors `PersonStore::run`/`SearchStore::run_with_directory`'s `Reset` arm.
     pub fn run(&mut self, cmd: MetadataCmd) -> bool {
         if matches!(&cmd, MetadataCmd::Reset) {
+            crate::metadata::cancel_skip_enrichment(&self.adapter);
             self.adapter = Arc::new(Default::default());
         }
         let changed = crate::metadata::run(&mut self.state, &self.adapter, cmd);

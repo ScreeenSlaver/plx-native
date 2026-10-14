@@ -37,6 +37,7 @@
   "widgets.playback.converting_codec": "Канвертаванне · {codec}",
   "widgets.chapters.number": "Раздзел {number}",
   "widgets.skip.intro": "Прапусціць застаўку",
+  "widgets.skip.recap": "Прапусціць паўтор",
   "widgets.skip.credits": "Прапусціць цітры",
   "widgets.next.episode": "Наступная серыя",
   "widgets.next.credits": "Глядзець цітры",

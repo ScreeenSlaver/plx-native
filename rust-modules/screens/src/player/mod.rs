@@ -1160,8 +1160,7 @@ impl<H: PlayerLike + crate::registry::MetadataLike> Focusable<H> for PlayerScree
             len: 1,
             elem: plx_ui::screen::ElemKind::Control,
         });
-        // Every item of whatever occupies the row — the Up Next PAIR included, which is two
-        // controls the D-pad walks and so two stops (`ControlSlot::item_rect`).
+        // Every item of whatever occupies the row, including More beside either stand-in.
         let row_len = self.slot.items().max(1) as usize;
         out.push(GroupSpec {
             id: GROUP_ROW,
@@ -1834,8 +1833,8 @@ mod step_ladder_tests {
         assert!(failure_n >= 1, "Back is always offered");
         let cases: [(&str, ControlSlot, Busy, Vec<u32>); 4] = [
             ("discs", ControlSlot::Discs, Busy::None, [row(3), vec![ELEM_TAB_BASE]].concat()),
-            ("skip", skip, Busy::None, [row(1), vec![ELEM_TAB_BASE]].concat()),
-            ("up next", up_next, Busy::None, [row(2), vec![ELEM_TAB_BASE]].concat()),
+            ("skip", skip, Busy::None, [row(2), vec![ELEM_TAB_BASE]].concat()),
+            ("up next", up_next, Busy::None, [row(3), vec![ELEM_TAB_BASE]].concat()),
             ("failed", ControlSlot::Discs, failed, (0..failure_n).map(|i| ELEM_FAILURE_BASE + i).collect()),
         ];
         for (name, slot, busy, controls) in cases {

@@ -1610,6 +1610,10 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
             // offer and re-raised the HUD over an intro the user was simply watching.
             let offer = fr.ctrl.offer();
             let fresh = offer.is_some() && offer != player.hud.last_offer;
+            let previous_btn = player.hud.nav.btn;
+            if let Some(btn) = player.slot.remap_more(fr.ctrl, player.hud.nav.focus == 1, previous_btn) {
+                player.hud.nav.btn = btn;
+            }
             if offer.is_some() {
                 player.hud.last_offer = offer;
             }
@@ -1626,9 +1630,10 @@ pub(crate) unsafe fn playback_tick(app: &mut App, fr: &mut Frame) {
                 // that rule, its resting-position clause and the bug are written down.
                 player.hud.raise_for_offer(fr.now, fr.ctrl.primary_btn());
             } else if plx_appkit::player_hud::standin_left_the_ring(
-                player.hud.was_standin,
+                player.slot,
                 fr.ctrl,
                 player.hud.nav.focus == 1,
+                previous_btn,
             ) {
                 // The stand-in went away under the focus ring. Without this the row swaps back
                 // to the discs with focus still on it and `btn` still 0, so the next OK opened
