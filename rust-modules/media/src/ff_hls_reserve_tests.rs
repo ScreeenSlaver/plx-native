@@ -295,6 +295,79 @@ fn proven_candidate_transition_settlement_reopens_generation() {
     );
 }
 
+/// A completed candidate must not kill the active HLS stream if a user Pause or rebuffer request
+/// wins while its network work is in flight (device playback_interrupted, 2026-10-19).
+#[test]
+fn a_clock_change_discards_private_quality_media_without_failing_playback() {
+    let _guard = plx_base::testlock::serial();
+    struct ResetClock(bool);
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            SHARED.reset_hls_clock_for_test();
+            SHARED.hls_rebuffer_requested.store(self.0, Ordering::Release);
+        }
+    }
+    let _reset = ResetClock(SHARED.hls_rebuffer_requested.swap(false, Ordering::AcqRel));
+    for user_pause in [false, true] {
+        SHARED.reset_hls_clock_for_test();
+        let stable = SHARED.hls_candidate_generation.load(Ordering::Acquire);
+        let trial = HlsTrialReserve::arm(1_000, SHARED.hls_user_sequence()).unwrap();
+        if user_pause {
+            let crate::player::HlsUserPause::Issue(pause) = SHARED.prepare_hls_user_pause().unwrap()
+            else {
+                panic!("running clock must issue the user Pause");
+            };
+            assert_eq!(
+                SHARED.complete_hls_user_pause(pause, true),
+                crate::player::HlsPauseCompletion::Accepted,
+            );
+        } else {
+            // The trial delays the native Pause, but the pump can request recovery while
+            // candidate I/O is in flight. That request already revokes upward publication.
+            SHARED.hls_rebuffer_requested.store(true, Ordering::Release);
+        }
+        assert!(matches!(HlsCandidateTransition::arm(trial.token()), Ok(None)));
+        assert_eq!(
+            SHARED.hls_candidate_generation.load(Ordering::Acquire),
+            stable,
+        );
+        drop(trial);
+        assert_eq!(SHARED.hls_trial_reserve_ms.load(Ordering::Acquire), -1);
+        assert_eq!(
+            SHARED.hls_automatic_transition_permitted(
+                crate::player::HlsAutomaticTransition::QualityDown,
+            ),
+            !user_pause,
+            "discard releases automatic recovery without overriding the viewer's Pause",
+        );
+        SHARED.hls_rebuffer_requested.store(false, Ordering::Release);
+        SHARED.reset_hls_clock_for_test();
+        let next = HlsTrialReserve::arm(1_000, SHARED.hls_user_sequence()).unwrap();
+        HlsCandidateTransition::arm(next.token())
+            .unwrap()
+            .unwrap()
+            .settle();
+    }
+}
+
+#[test]
+fn candidate_admission_still_fails_closed_on_teardown_or_overlap() {
+    let _guard = plx_base::testlock::serial();
+    SHARED.reset_hls_clock_for_test();
+    SHARED.stop_hls_clock();
+    assert!(matches!(
+        HlsCandidateTransition::arm(0),
+        Err(HlsExit::Aborted)
+    ));
+    SHARED.reset_hls_clock_for_test();
+    let transition = HlsCandidateTransition::arm_unowned_for_test().unwrap();
+    assert!(matches!(
+        HlsCandidateTransition::arm_unowned_for_test(),
+        Err(HlsExit::Failed("overlapping HLS candidate publication")),
+    ));
+    transition.settle();
+}
+
 #[test]
 fn unwind_after_candidate_media_publication_stays_fenced_until_teardown() {
     let _guard = plx_base::testlock::serial();

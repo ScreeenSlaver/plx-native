@@ -5187,18 +5187,22 @@ struct HlsCandidateTransition {
 }
 
 impl HlsCandidateTransition {
-    fn arm(automatic_token: u64) -> Result<Self, HlsExit> {
+    // None is a revoked private candidate, before any of its AUs have been published. The
+    // running stream still owns its cursor and must survive a user/native clock transition.
+    fn arm(automatic_token: u64) -> Result<Option<Self>, HlsExit> {
         Self::arm_for(Some(automatic_token))
     }
 
     #[cfg(any(test, feature = "test-support"))]
     fn arm_unowned_for_test() -> Result<Self, HlsExit> {
-        Self::arm_for(None)
+        Self::arm_for(None).map(|transition| {
+            transition.expect("unowned publication cannot be superseded")
+        })
     }
 
-    fn arm_for(automatic_token: Option<u64>) -> Result<Self, HlsExit> {
+    fn arm_for(automatic_token: Option<u64>) -> Result<Option<Self>, HlsExit> {
         match SHARED.begin_hls_candidate_transition(automatic_token) {
-            Ok(generation) => Ok(Self { generation }),
+            Ok(generation) => Ok(Some(Self { generation })),
             Err(crate::player::HlsClockFenceError::Stopping) => Err(HlsExit::Aborted),
             Err(crate::player::HlsClockFenceError::Overlap) => {
                 Err(HlsExit::Failed("overlapping HLS candidate publication"))
@@ -5206,9 +5210,7 @@ impl HlsCandidateTransition {
             Err(crate::player::HlsClockFenceError::Exhausted) => {
                 Err(HlsExit::Failed("HLS candidate generation exhausted"))
             }
-            Err(crate::player::HlsClockFenceError::Superseded) => Err(HlsExit::Failed(
-                "HLS candidate automatic lease was superseded",
-            )),
+            Err(crate::player::HlsClockFenceError::Superseded) => Ok(None),
         }
     }
 
@@ -7311,7 +7313,26 @@ fn hls_demux(
                 .or_else(|| _automatic_lease.as_ref().map(HlsAutomaticLease::token))
                 .expect("every HLS candidate transaction owns one automatic actuator lease");
             candidate_transition = match HlsCandidateTransition::arm(automatic_token) {
-                Ok(transition) => Some(transition),
+                Ok(Some(transition)) => Some(transition),
+                Ok(None) => {
+                    // Candidate I/O can outlive a user Pause/Resume or an internal rebuffer.
+                    // Nothing from it has reached the queues yet, so discard it exactly like
+                    // any other private rejection. Killing this demux would also kill the
+                    // untouched active encoder which still owns the picture and timeline.
+                    control.abandon(&primed.encoder_session);
+                    reject_hls_abr_after_transaction(
+                        controller,
+                        proposal,
+                        crate::abr::RejectCause::Circumstance,
+                        &mut tx,
+                        now_ms(),
+                    );
+                    tx.finish("publication_superseded");
+                    crate::player::log(
+                        "abr: candidate clock changed before publication; staying on current rung",
+                    );
+                    continue 'segments;
+                }
                 Err(error) => {
                     control.abandon(&primed.encoder_session);
                     tx.finish("publication_overlap");
