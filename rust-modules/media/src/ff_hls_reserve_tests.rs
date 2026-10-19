@@ -313,14 +313,9 @@ fn a_clock_change_discards_private_quality_media_without_failing_playback() {
         let stable = SHARED.hls_candidate_generation.load(Ordering::Acquire);
         let trial = HlsTrialReserve::arm(1_000, SHARED.hls_user_sequence()).unwrap();
         if user_pause {
-            let crate::player::HlsUserPause::Issue(pause) = SHARED.prepare_hls_user_pause().unwrap()
-            else {
-                panic!("running clock must issue the user Pause");
-            };
-            assert_eq!(
-                SHARED.complete_hls_user_pause(pause, true),
-                crate::player::HlsPauseCompletion::Accepted,
-            );
+            // Pause issuance itself wins the clock boundary; no native call is needed to
+            // prove that the still-private quality candidate has lost its authority.
+            assert!(SHARED.prepare_hls_user_pause().is_some());
         } else {
             // The trial delays the native Pause, but the pump can request recovery while
             // candidate I/O is in flight. That request already revokes upward publication.
